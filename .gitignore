@@ -13,6 +13,12 @@ Thumbs.db
 /out/
 /sealed/
 
+# Python bytecode. packaging/linux/mktar.py is run as a script, which writes none, but
+# importing it or running py_compile over the tree does -- and the directory then sits in the
+# working tree untracked, which is how it was noticed.
+__pycache__/
+*.pyc
+
 # coverage collection (NODE_V8_COVERAGE output directory)
 /coverage/
 *.cov.json

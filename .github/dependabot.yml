@@ -32,11 +32,20 @@ updates:
     commit-message:
       prefix: ci
     groups:
-      # One pull request for all four actions. They are pinned together and reviewed together,
-      # and an Action bump either keeps the pipeline working or does not, which one CI run says.
+      # One pull request for minor and patch bumps of all four actions. They are pinned together
+      # and reviewed together, and a bump of that size either keeps the pipeline working or does
+      # not, which one CI run says.
+      #
+      # Majors are deliberately left out. The first pull request this file produced bundled
+      # `actions/checkout` 4.4.0 into 7.0.1 and `download-artifact` 3.3.0 into 4.2.0 into a
+      # single diff, which is a change nobody reads and therefore nobody reviews. The npm groups
+      # below already apply this rule; there was no reason for actions to be the exception.
       actions:
         patterns:
           - '*'
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: npm
     directory: /

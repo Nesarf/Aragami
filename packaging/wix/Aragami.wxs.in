@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MSI authoring for Aragami.
+
+  Placeholders (@NAME@, @VERSION@, @UPGRADECODE@, @PAYLOAD@) are substituted by
+  packaging/pack-msi.ps1. The UpgradeCode must stay stable per product across versions or
+  upgrades install side by side instead of replacing; that is why the script holds the
+  GUIDs as constants rather than generating them per build.
+
+  The payload is the bundled CommonJS output plus the generated launchers, laid out
+  identically to the portable package so the launchers' relative paths keep working.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package
+      Name="@NAME@"
+      Manufacturer="Nesarf"
+      Version="@VERSION@"
+      UpgradeCode="@UPGRADECODE@"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of @NAME@ is already installed. Uninstall it first if you really need to go back." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="@DIRNAME@" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="@NAME@" Level="1">
+      <ComponentGroupRef Id="Payload" />
+      <ComponentRef Id="PathEntry" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <!-- Harvest the staged payload. Every file under the payload root is installed beneath
+         INSTALLFOLDER, preserving the bin/ and dist/ layout the launchers depend on. -->
+    <ComponentGroup Id="Payload" Directory="INSTALLFOLDER">
+      <Files Include="@PAYLOAD@\**" />
+    </ComponentGroup>
+  </Fragment>
+
+  <Fragment>
+    <Component Id="PathEntry" Directory="INSTALLFOLDER" Guid="@PATHGUID@">
+      <!-- Put the launchers on PATH so the tool can be invoked by name. Part="last" appends
+           rather than overwriting an existing PATH. -->
+      <Environment Id="PathEnv" Name="PATH" Value="[INSTALLFOLDER]bin" Part="last" Action="set" System="yes" />
+      <RegistryValue Root="HKLM" Key="Software\Nesarf\Aragami" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Fragment>
+
+</Wix>

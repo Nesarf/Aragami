@@ -1,0 +1,109 @@
+# snapcraft.yaml for Aragami.
+#
+# Four things here were wrong in the first version, and finding them took four real builds.
+# The first three were shared with the Flatpak, which had never been built either:
+#
+#   The comment claimed the Node runtime is "bundled from the store". Nothing bundled it: there
+#   was no node part and no stage-packages, while the wrappers exec a bare `node`.
+#
+#   `source: ../..` reaches packaging/, not the repository root, because this manifest lives at
+#   packaging/linux/snap/. The build copied it to the root first, which moved that path again.
+#
+#   Only four apps were declared. aragami-tor-mcp and aragami-firefox-mcp had wrappers
+#   generated for them and no way to invoke them.
+#
+# The fourth only a real build could show, and it took three attempts to get past:
+#
+#   `organize: '*': lib/aragami/'` moves the whole source into lib/aragami/, and the source
+#   contains a lib/ directory of its own, so the move target was a path inside the thing being
+#   moved -- "Cannot move a directory '.../install/lib' into itself".
+#
+#   Fixing that by copying the payload explicitly then failed on `$CRAFT_PROJECT_DIR`, which is
+#   the directory holding this manifest rather than the repository root.
+#
+#   With the build green, the snap installed and every command died with "libnode.so.109:
+#   cannot open shared object file", because Ubuntu splits nodejs into a shared library and a
+#   classic snap does not put $SNAP/usr/lib on the loader path. Adding that made node start and
+#   then abort on "Cannot load externalized builtin: /usr/share/nodejs/..." -- the distribution
+#   build of nodejs resolves some builtins through absolute host paths that cannot exist inside
+#   a snap. The distribution's nodejs is simply not usable here, and the official Node tarball
+#   is, because it is self-contained.
+#
+# confinement is classic rather than strict, and that is a judgement about what the tool does.
+# The audit reads a browser install or profile from wherever it is: /opt/torbrowser, ~/.mozilla,
+# ~/.local/share/torbrowser. Under strict confinement the home interface excludes hidden files,
+# so ~/.mozilla is unreachable and the Firefox target cannot work at all. A strict snap would
+# install cleanly and then be unable to do the one thing it exists for. Classic snaps need the
+# user to opt in with --classic, which is the honest trade for a tool whose whole job is reading
+# files it was pointed at.
+name: aragami
+title: Aragami
+base: core24
+version: '@VERSION@'
+summary: Static posture audit for Tor Browser and Firefox
+description: |
+  Aragami reads a browser install or profile and reports configuration posture and static
+  residue across six layers: build, transport, content/authorization, metadata, endpoint and
+  social.
+
+  It is read-only: it never launches the browser under audit and never uses the network
+  except for the version lookup. A clean audit is not proof of safety.
+grade: stable
+confinement: classic
+license: MIT
+contact: https://github.com/Nesarf/Aragami/issues
+issues: https://github.com/Nesarf/Aragami/issues
+website: https://github.com/Nesarf/Aragami
+source-code: https://github.com/Nesarf/Aragami
+
+parts:
+  # The interpreter the wrappers exec. A snap must not reach outside its own confinement for a
+  # runtime, so one is carried in the bundle. The fetch lives in packaging/linux/fetch-node.sh
+  # because the AppImage step needs the same binary under the same rule, and a version written
+  # down in two places is a version that will disagree with itself.
+  node:
+    plugin: nil
+    build-packages:
+      - curl
+      - ca-certificates
+      - xz-utils
+    override-build: |
+      sh "$CRAFT_PROJECT_DIR/../../../packaging/linux/fetch-node.sh" \
+        "$CRAFT_PART_INSTALL/bin/node"
+
+  aragami:
+    plugin: nil
+    after: [node]
+    override-build: |
+      # $CRAFT_PROJECT_DIR is the directory holding this manifest, not the repository root, so
+      # the payload is three levels up from it.
+      REPO="$CRAFT_PROJECT_DIR/../../.."
+      install -d $CRAFT_PART_INSTALL/lib/aragami
+      cp -R "$REPO/dist" $CRAFT_PART_INSTALL/lib/aragami/
+      cp "$REPO/README.md" "$REPO/LICENSE" "$REPO/Aragami" $CRAFT_PART_INSTALL/lib/aragami/
+
+  wrappers:
+    plugin: dump
+    source: wrappers
+    organize:
+      '*': bin/
+
+apps:
+  aragami:
+    command: bin/aragami
+    plugs: [home, network]
+  aragami-mcp:
+    command: bin/aragami-mcp
+    plugs: [home, network]
+  aragami-tor:
+    command: bin/aragami-tor
+    plugs: [home, network]
+  aragami-tor-mcp:
+    command: bin/aragami-tor-mcp
+    plugs: [home, network]
+  aragami-firefox:
+    command: bin/aragami-firefox
+    plugs: [home, network]
+  aragami-firefox-mcp:
+    command: bin/aragami-firefox-mcp
+    plugs: [home, network]

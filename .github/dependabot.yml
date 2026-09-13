@@ -1,0 +1,71 @@
+# Dependabot configuration.
+#
+# The actions in the release workflow are pinned to commit SHAs rather than to their moving
+# major tags, so that what executes in the pipeline is fixed by that file. Pinning is only
+# safe if there is a way to move forward deliberately, and this is it: Dependabot understands
+# the `uses: owner/repo@<sha> # vX` form, so it updates the hash and keeps the readable
+# version comment beside it. Without this the pins would quietly rot.
+#
+# Everything is grouped and weekly. A security tool with three dependencies does not need a
+# stream of individual pull requests, and a grouped one is easier to read, test and revert
+# than six that arrive together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # A version is not proposed until it has been published for a while. The attack this
+    # guards against is a compromised release that is published, picked up automatically, and
+    # then withdrawn -- the window is short, and waiting it out costs nothing here.
+    #
+    # Only `default-days` is accepted for this ecosystem. The semver-specific keys are valid
+    # for npm and rejected here, and an unsupported key is not ignored: Dependabot refuses the
+    # whole file with "the property '#/updates/0/cooldown/semver-major-days' is not supported
+    # for the package ecosystem 'github-actions'", which stops version updates entirely while
+    # the workflow itself keeps passing. Action versions do not carry a major/minor/patch
+    # distinction worth waiting separately on, so one uniform window is all that can be asked.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    groups:
+      # One pull request for all four actions. They are pinned together and reviewed together,
+      # and an Action bump either keeps the pipeline working or does not, which one CI run says.
+      actions:
+        patterns:
+          - '*'
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # The same window, with the semver split this ecosystem does support: majors wait longest,
+    # because they are both the most disruptive and the most attractive target.
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+      prefix-development: deps-dev
+    groups:
+      # @modelcontextprotocol/sdk is the one runtime dependency, and the MCP server is built
+      # on it. Patch and minor updates arrive as one pull request; a major one is left on its
+      # own, because a breaking change in the protocol layer is something to read rather than
+      # to skim in a group, and the mcp-smoke suite exists to say whether it still speaks MCP.
+      production:
+        dependency-type: production
+        update-types:
+          - minor
+          - patch
+      # esbuild and postject are build tooling, used by the bundler and the single-file
+      # executable. Grouped regardless of update type: a break shows up as a build failure,
+      # not as something subtle, and the windows job builds with both on every pull request.
+      development:
+        dependency-type: development

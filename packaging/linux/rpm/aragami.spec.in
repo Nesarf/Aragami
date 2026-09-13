@@ -1,0 +1,68 @@
+# RPM spec for Aragami.
+#
+# rpmbuild has no Windows equivalent, which is why this is the one Linux form that is not
+# assembled by a script in packaging\linux\. It does build locally now that WSL is set up,
+# and the per-target variants are generated the same way the .deb ones are: @PACKAGE@ and
+# @CONFLICTS@ are substituted per target rather than the spec being duplicated three times.
+Name:           @PACKAGE@
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Static posture audit for Tor Browser and Firefox
+License:        MIT
+URL:            https://github.com/Nesarf/Aragami
+BuildArch:      noarch
+Requires:       nodejs >= 18
+@CONFLICTS@
+
+%description
+Aragami reads a browser install or profile and reports configuration posture and static
+residue across five layers: build, transport, content/authorization, metadata and endpoint.
+
+It is read-only: it never launches the browser under audit and never uses the network except
+for the version lookup. A clean audit is not proof of safety.
+
+%install
+mkdir -p %{buildroot}%{_datadir}/aragami %{buildroot}%{_bindir}
+cp -R %{_sourcedir}/dist %{buildroot}%{_datadir}/aragami/
+cp %{_sourcedir}/README.md %{_sourcedir}/LICENSE %{_sourcedir}/Aragami %{buildroot}%{_datadir}/aragami/
+
+# Modes are set explicitly rather than inherited. `cp` preserves what the source filesystem
+# says, and a source tree on a drvfs mount (WSL reading /mnt/e, which is how this is built
+# locally) reports every file as 0777 -- which shipped an executable README. The package
+# contents should not depend on where the sources were checked out.
+#
+# The seal belongs in this list for a second reason: it has no extension, so it is exactly the
+# kind of file a reader would not think to check, and an emblem that arrived executable would be
+# a strange thing to find in /usr/share.
+chmod 644 %{buildroot}%{_datadir}/aragami/README.md \
+           %{buildroot}%{_datadir}/aragami/LICENSE \
+           %{buildroot}%{_datadir}/aragami/Aragami \
+           %{buildroot}%{_datadir}/aragami/dist/*.cjs
+chmod 755 %{buildroot}%{_datadir}/aragami/dist
+
+write_wrapper() {
+  name="$1"; entry="$2"; pinned="$3"
+  {
+    echo '#!/bin/sh'
+    [ -n "$pinned" ] && echo "ARAGAMI_TARGET=${pinned}; export ARAGAMI_TARGET"
+    echo "exec node %{_datadir}/aragami/dist/${entry} \"\$@\""
+  } > %{buildroot}%{_bindir}/${name}
+  chmod 755 %{buildroot}%{_bindir}/${name}
+}
+write_wrapper aragami            cli.cjs ""
+write_wrapper aragami-mcp        mcp.cjs ""
+write_wrapper aragami-tor        cli.cjs tor
+write_wrapper aragami-tor-mcp    mcp.cjs tor
+write_wrapper aragami-firefox     cli.cjs firefox
+write_wrapper aragami-firefox-mcp mcp.cjs firefox
+
+%files
+%{_datadir}/aragami
+%{_bindir}/aragami
+%{_bindir}/aragami-mcp
+%{_bindir}/aragami-tor
+%{_bindir}/aragami-tor-mcp
+%{_bindir}/aragami-firefox
+%{_bindir}/aragami-firefox-mcp
+
+%changelog

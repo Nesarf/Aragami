@@ -1,0 +1,451 @@
+name: release
+
+# Release pipeline for Aragami.
+#
+# Why CI builds the Linux packages: rpmbuild, appimagetool, flatpak-builder and snapcraft
+# are Linux tools with no Windows equivalent, and CI is authoritative for the ones that do
+# exist here -- the package gets built by the same platform that will install it.
+#
+# That distinction is worth keeping straight. A .deb is just an ar archive of two tarballs,
+# so packaging/linux/build-deb.ps1 does build one locally, and the first version of it was
+# broken in a way CI would never have produced: tar on Windows has no execute bit to
+# preserve, so every wrapper in usr/bin came out mode 0666 and the package would have
+# installed cleanly and then failed with "Permission denied". The mode has to be stated
+# rather than inherited, which is what packaging/linux/mktar.py does, and the assertion
+# that catches it is `mktar.py --check`. The tarball is the other form built locally,
+# because it needs no toolchain at all.
+#
+# On a tag push this builds every artifact the project offers and attaches them to a GitHub
+# Release. On a branch push it builds and verifies but does not publish, so a broken recipe
+# is caught before a release exists.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  # Pull requests are verified too, which matters because of Dependabot. Its whole job is to
+  # propose changes to dependencies -- including @modelcontextprotocol/sdk, which the MCP
+  # server is built on -- and a PR that runs no checks would put those changes into main
+  # unverified. push is restricted to main, so a branch in this repository triggers one run
+  # through the PR and not a second through push. publish is unaffected: it requires a tag ref.
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege. The release job needs to write, and it is the only one: this was
+# `contents: write` at the workflow level, which handed write access to the three build jobs
+# as well. They only read the checkout and upload artifacts.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: tests
+    runs-on: ubuntu-latest
+    # statuses: write is asked for here rather than at the workflow level, for the coverage
+    # status below. contents stays read: this job reads a checkout and nothing else. The first
+    # version of that step failed because the workflow-level `contents: read` was doing its
+    # job -- posting a status is a different permission and it had not been requested.
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      # Actions are pinned to commit SHAs rather than to their moving major tags. `@v4` is a
+      # branch-like tag that the upstream repository can repoint at any time, and whatever it
+      # points at runs in this pipeline with the repository's token. Pinning removes that:
+      # what executes is fixed by this file. The trailing comment keeps the human-readable
+      # version, since a bare hash says nothing about how old it is. Updating means bumping
+      # the hash deliberately, which is the point.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The checkout otherwise leaves the token in .git/config, where it can be picked up
+          # by anything that packages the working tree. No step here pushes or fetches.
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          # Caching is off explicitly. This workflow publishes the artifacts it builds, and a
+          # package cache is a place where something else's content can end up in them.
+          package-manager-cache: false
+      - run: npm ci
+      - name: unit and contract suites
+        run: |
+          node test/net.mjs
+          node test/matrix.mjs
+          node test/mcp-smoke.mjs
+          node test/firefox.mjs
+          node test/selftest.mjs
+      # The gate has been wrong twice, in opposite directions, which is why it carries this much
+      # explanation.
+      #
+      # 100 was the first value, and it is unreachable rather than merely ambitious: coverage is
+      # platform dependent. This job runs on Linux, which cannot execute the Windows drive-letter
+      # scan or the WinINET proxy read, while Windows cannot execute the /usr/lib/firefox
+      # candidates. Only 5 lines are uncovered on both platforms.
+      #
+      # 97 was the second value, and it was measured on a machine that happened to have a proxy,
+      # so it failed the job it was meant to protect the moment it ran here. On a runner without
+      # one the proxy tunnel's success path -- writing the request after the TLS handshake and
+      # reading the response back -- was never entered, and net.mjs reported 164/190 against
+      # 188/190. The whole gap was that path.
+      #
+      # test/net.mjs now runs it against a local TLS fixture, so those lines are covered whether
+      # or not a proxy is configured: net.mjs measures 189/190 here and 190/190 on Windows, and
+      # this runner measures 1461/1499 = 97.5%. The single line it cannot reach is 93,
+      # readWininetProxy, which is Windows-only by construction; line 92 is reached only where
+      # there is no proxy variable to return from, which is why the runner gets 92 and misses 93
+      # while a Linux box with a proxy variable misses both.
+      #
+      # The status this job publishes on every run carries the real number and the worst file's
+      # uncovered lines, so the figure is readable from outside rather than inferred.
+      - name: coverage must not regress
+        run: |
+          set -o pipefail
+          node test/coverage.mjs --min 97 2>&1 | tee coverage-report.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage-report.txt
+          # Long enough to read after a failure, short enough that the reports do not pile up.
+          # They are half a kilobyte each, so this is about tidiness rather than space.
+          retention-days: 14
+      # The numbers also go onto the commit as a status, which is the one place a build result
+      # can be read from outside without a token. Step logs and artifacts both need
+      # authentication even on a public repository, so a threshold failure there says only
+      # "failed" to anyone looking from a script -- which is what made the first failure here
+      # take a round trip to even see a number for. A status is short, public, and attached to
+      # the commit it describes.
+      - name: publish coverage to the commit status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CLEAN=$(sed 's/\x1b\[[0-9;]*m//g' coverage-report.txt | tr -s ' ')
+          TOTAL=$(printf '%s\n' "$CLEAN" | grep -oE 'total +[0-9]+/[0-9]+ +[0-9.]+%' | tr -s ' ' | sed 's/^ //')
+          SUITES=$(printf '%s\n' "$CLEAN" | grep -oE 'suites [0-9]+/[0-9]+ passed' | sed 's/ passed//')
+          # The uncovered lines for the file with the most of them, counted by line rather than
+          # by how many comma-separated ranges the report compressed them into -- counting
+          # ranges picks whichever file happened to be listed in fewer groups, which is not the
+          # same question. A report that only says a percentage cannot be acted on, and this is
+          # the only channel readable from outside without a token.
+          WORST=$(printf '%s\n' "$CLEAN" | awk '
+            /^ lib\//{ f=$1; gsub("lib/", "", f) }
+            /uncovered lines:/{
+              n = split($0, a, ": ");
+              c = 0;
+              m = split(a[2], g, ",");
+              for (i = 1; i <= m; i++) { k = split(g[i], r, "-"); c += (k == 2 ? r[2] - r[1] + 1 : 1) }
+              if (c > best) { best = c; w = f ": " a[2] }
+            }
+            END { print w }')
+          STATE=success
+          printf '%s\n' "$CLEAN" | grep -q 'below the threshold' && STATE=failure
+          # Any suite that did not pass is a failure, read from the report rather than matched
+          # against a shape. This was `grep -qE "Summary: suites [0-4]/5"`, which stopped
+          # matching the moment a sixth suite was added: the report then read "suites 5/6", the
+          # pattern still wanted "/5", the guard never fired, and this status would have said
+          # success for a run whose own log said a suite had failed. A status that exists to be
+          # readable from outside is worse than useless if it cannot report the one thing it is
+          # for. Comparing the two numbers means the next suite added cannot reintroduce it, and
+          # an absent or unparseable report counts as failure rather than as a pass.
+          PASSED=${SUITES#suites }; PASSED=${PASSED%%/*}; RAN=${SUITES##*/}
+          if [ -z "$PASSED" ] || [ "$PASSED" != "$RAN" ]; then STATE=failure; fi
+          DESC="${TOTAL} ${SUITES} | worst ${WORST}"
+          DESC=${DESC:0:139}
+          gh api "repos/${{ github.repository }}/statuses/$GITHUB_SHA" \
+            -f state="$STATE" \
+            -f context="aragami/coverage" \
+            -f "description=$DESC" \
+            -f "target_url=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >/dev/null
+          echo "reported: $DESC"
+
+  windows:
+    name: windows artifacts
+    runs-on: windows-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          package-manager-cache: false
+      - run: npm ci
+      - name: portable zips
+        shell: pwsh
+        run: |
+          ./packaging/pack-portable.ps1
+          ./packaging/pack-portable.ps1 -Target tor
+          ./packaging/pack-portable.ps1 -Target firefox
+      - name: install WiX
+        shell: pwsh
+        run: dotnet tool install --global wix --version 5.*
+      - name: MSI packages
+        shell: pwsh
+        run: |
+          ./packaging/pack-msi.ps1
+          ./packaging/pack-msi.ps1 -Target tor
+          ./packaging/pack-msi.ps1 -Target firefox
+      - name: single-file executables
+        shell: pwsh
+        run: |
+          # Three calls, matching the portable and MSI steps above. Every packaging script
+          # treats -Target all as "the neutral, auto-detecting package", so one call per target
+          # is what produces the full set. This step used to make a single call, because
+          # pack-sea.ps1 alone interpreted `all` as "every variant" -- correct output, but only
+          # by accident, and a different meaning for the same argument value.
+          ./packaging/pack-sea.ps1
+          ./packaging/pack-sea.ps1 -Target tor
+          ./packaging/pack-sea.ps1 -Target firefox
+      - name: winget manifests
+        shell: pwsh
+        run: ./packaging/winget/generate.ps1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows
+          path: |
+            artifacts/**
+            packaging/winget/manifests/**
+          # The publish job reads these within the same run and the release is the durable copy,
+          # so a day is generous. The default is ninety, which is how a repository accumulates
+          # gigabytes of build output that nothing will ever read again.
+          retention-days: 1
+
+  linux:
+    name: linux artifacts
+    # Pinned rather than ubuntu-latest, because of the Snap. snapcraft refuses to build a
+    # core24 snap on a host that is not 24.04 -- deliberately, so that the binaries in the
+    # artifact are known to be compatible with where it will run: "Ubuntu 24.04 builds cannot
+    # be performed on this Ubuntu 26.04 system." When ubuntu-latest moves to the next LTS this
+    # job would start failing at the last step, long after the manifest was written, and for a
+    # reason that looks like a tooling accident rather than a version pairing. Pinning keeps
+    # the base and the host in step; moving both together is then a deliberate act.
+    runs-on: ubuntu-24.04
+    needs: verify
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          package-manager-cache: false
+      - run: npm ci
+      - name: bundle
+        run: node packaging/bundle.mjs --format cjs --outdir dist
+
+      - name: tarball
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          # artifacts/ does not exist on a fresh checkout, and this is the first step that
+          # writes into it. Every later step happens to work only because this one has already
+          # created it, so the failure was here and nowhere else. It did not show up locally
+          # because the local run of these same commands created the directory by hand first --
+          # a reproduction is only as faithful as what it does not add.
+          mkdir -p artifacts
+          for T in all tor firefox; do
+            SUFFIX=""; [ "$T" != all ] && SUFFIX="-$T"
+            ROOT="aragami${SUFFIX}-${VERSION}"
+            mkdir -p "stage/$ROOT"
+            # `Aragami` is the seal described in the README: no extension, one small ASCII
+            # envelope. It is carried beside the code in every package, so that what the tool
+            # reports from `aragami_env` is also a file someone can find and read the shape of.
+            cp -R dist README.md LICENSE Aragami packaging/linux/install.sh "stage/$ROOT/"
+            tar -czf "artifacts/${ROOT}-linux.tar.gz" -C stage "$ROOT"
+          done
+
+      - name: deb
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          for T in all tor firefox; do
+            SUFFIX=""; [ "$T" != all ] && SUFFIX="-$T"
+            NAME="aragami${SUFFIX}"
+            ROOT="pkg/$NAME"
+            mkdir -p "$ROOT/DEBIAN" "$ROOT/usr/lib/aragami" "$ROOT/usr/bin"
+            cp -R dist README.md LICENSE Aragami "$ROOT/usr/lib/aragami/"
+            sed "s/@VERSION@/$VERSION/" packaging/linux/deb/control.in \
+              | sed "s/^Package: aragami$/Package: $NAME/" > "$ROOT/DEBIAN/control"
+            # The per-target packages all own /usr/bin/aragami and /usr/lib/aragami, so they
+            # have to declare the conflict. Without it dpkg would happily half-overwrite one
+            # package with another.
+            if [ "$T" != all ]; then
+              printf 'Conflicts: aragami, aragami-tor, aragami-firefox\nReplaces: aragami, aragami-tor, aragami-firefox\n' >> "$ROOT/DEBIAN/control"
+            fi
+            for pair in "aragami:cli.cjs:" "aragami-mcp:mcp.cjs:" \
+                        "aragami-tor:cli.cjs:tor" "aragami-tor-mcp:mcp.cjs:tor" \
+                        "aragami-firefox:cli.cjs:firefox" "aragami-firefox-mcp:mcp.cjs:firefox"; do
+              n=${pair%%:*}; rest=${pair#*:}; entry=${rest%%:*}; pin=${rest#*:}
+              { echo '#!/bin/sh'; [ -n "$pin" ] && echo "ARAGAMI_TARGET=$pin; export ARAGAMI_TARGET"
+                echo "exec node /usr/lib/aragami/dist/$entry \"\$@\""; } > "$ROOT/usr/bin/$n"
+              chmod 755 "$ROOT/usr/bin/$n"
+            done
+            (cd "$ROOT" && find usr -type f -exec md5sum {} + > DEBIAN/md5sums)
+            dpkg-deb --build --root-owner-group "$ROOT" "artifacts/${NAME}_${VERSION}_all.deb"
+          done
+
+      - name: rpm
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm
+          VERSION=$(node -p "require('./package.json').version")
+          # Runs the same build-rpm.sh the local build uses, rather than repeating the
+          # recipe here. It did repeat it, and when the spec grew @PACKAGE@ and @CONFLICTS@
+          # for the per-target variants this copy was left behind still substituting only
+          # @VERSION@ -- which would have produced a spec with a literal "Name: @PACKAGE@"
+          # and a single package instead of three.
+          mkdir -p rpm-src
+          cp -R dist README.md LICENSE Aragami rpm-src/
+          sh packaging/linux/build-rpm.sh "$VERSION" rpm-src artifacts
+
+      - name: AppImage
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          curl -sSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          ROOT="AppDir"
+          mkdir -p "$ROOT/usr/lib/aragami" "$ROOT/usr/bin"
+          cp -R dist README.md LICENSE Aragami "$ROOT/usr/lib/aragami/"
+          # The official Node build, not the one on PATH. This was `cp "$(command -v node)"`,
+          # and on a distribution that ships node as a shared library it copied a binary that
+          # links against libnode.so.NNN -- so the AppImage carried a runtime that only worked
+          # on a machine with that library installed, which is the opposite of the point. It
+          # failed with "libnode.so.127: cannot open shared object file" on a clean Ubuntu.
+          sh packaging/linux/fetch-node.sh "$ROOT/usr/lib/aragami/node"
+          cp packaging/linux/appimage/AppRun "$ROOT/AppRun"; chmod 755 "$ROOT/AppRun"
+          printf '[Desktop Entry]\nType=Application\nName=Aragami\nExec=aragami\nIcon=aragami\nCategories=Utility;Security;\nTerminal=true\n' > "$ROOT/aragami.desktop"
+          # A committed 256x256 PNG. This used to generate one with ImageMagick and fall back
+          # to `printf '\211PNG\r\n\032\n'` -- which writes the PNG signature and nothing else,
+          # so it is not a PNG at all. ImageMagick is no longer installed on the runner images,
+          # so the fallback was the branch that actually ran.
+          cp packaging/linux/appimage/aragami.png "$ROOT/aragami.png"
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run "$ROOT" "artifacts/aragami-${VERSION}-x86_64.AppImage"
+
+      - name: Flatpak
+        run: |
+          sudo apt-get install -y -qq flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+          VERSION=$(node -p "require('./package.json').version")
+          # Built from where the manifest lives, so its relative source path means the same
+          # thing here as it does locally. This step used to copy it to the repository root
+          # first, which silently moved that path.
+          #
+          # --install-deps-from pulls the Sdk extension the manifest declares. Without it
+          # flatpak-builder fails on a missing extension, because the step above only installs
+          # the platform and the sdk.
+          flatpak-builder --user --repo=repo --force-clean --install-deps-from=flathub \
+            build-dir packaging/linux/flatpak/org.nesarf.Aragami.yaml
+          flatpak build-bundle repo "artifacts/aragami-${VERSION}.flatpak" org.nesarf.Aragami
+
+      - name: Snap
+        run: |
+          sudo snap install snapcraft --classic
+          VERSION=$(node -p "require('./package.json').version")
+          # Built from the manifest's own directory. Copying it to the repository root first
+          # moved its relative source path, which is the bug the Flatpak step had too.
+          cd packaging/linux/snap
+          sed -i "s/@VERSION@/$VERSION/" snapcraft.yaml
+          mkdir -p wrappers
+          # All six, matching the wrappers the .deb and .rpm install. This loop listed four --
+          # the two per-target MCP entries were missing, so the snap quietly shipped without
+          # aragami-tor-mcp and aragami-firefox-mcp while every other package had them.
+          for pair in "aragami:cli.cjs:" "aragami-mcp:mcp.cjs:" \
+                      "aragami-tor:cli.cjs:tor" "aragami-tor-mcp:mcp.cjs:tor" \
+                      "aragami-firefox:cli.cjs:firefox" "aragami-firefox-mcp:mcp.cjs:firefox"; do
+            n=${pair%%:*}; rest=${pair#*:}; entry=${rest%%:*}; pin=${rest#*:}
+            { echo '#!/bin/sh'; [ -n "$pin" ] && echo "ARAGAMI_TARGET=$pin; export ARAGAMI_TARGET"
+              # The interpreter carried in the snap's own node part, not one from PATH: a snap
+              # may not reach outside its confinement for a runtime. It is at bin/node rather
+              # than usr/bin because it is the official Node tarball rather than a staged
+              # distribution package -- the distribution's nodejs resolves some builtins
+              # through absolute host paths and aborts inside a snap.
+              echo "exec \$SNAP/bin/node \$SNAP/lib/aragami/dist/$entry \"\$@\""; } > "wrappers/$n"
+            chmod 755 "wrappers/$n"
+          done
+          snapcraft pack --destructive-mode
+          cp ./*.snap "$GITHUB_WORKSPACE/artifacts/" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux
+          path: artifacts/**
+          # Same reasoning as the windows job: read by publish in this run, superseded by the
+          # release itself, and not worth ninety days of retention at roughly 90 MB a build.
+          retention-days: 1
+
+  publish:
+    name: publish release
+    runs-on: ubuntu-latest
+    needs: [windows, linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    # The one job that needs to write, and it says so here rather than at the workflow level.
+    permissions:
+      contents: write
+      # For reporting a failure below. A release step that fails otherwise says only that it
+      # failed to anything looking from outside without a token, which is where this was
+      # debugged from.
+      statuses: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+      # `gh release create` rather than a third-party release action. gh is preinstalled on the
+      # runners, so this removes an action from the supply chain instead of pinning it, which is
+      # strictly better than pinning something that does not need to be there at all.
+      #
+      # --generate-notes is deliberately absent. GitHub ignores it when release notes are
+      # supplied, so setting both would have looked like it produced a changelog and quietly
+      # produced nothing. The notes below are the ones that have to survive: they carry the
+      # framing that this is an auditor rather than a hardening tool and that a clean audit is
+      # not proof of safety, and a release page is where someone first meets the tool. The
+      # commit list is one click away on the tag.
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'NOTES'
+          Static posture auditor for Tor Browser and Firefox.
+
+          Every package is produced per target: `aragami` handles both and auto-detects,
+          while the `-tor` and `-firefox` variants open with that target. A launcher only
+          sets a default; an explicit `--target` always wins.
+
+          **This is an auditor, not a hardening tool.** It reads files and reports static
+          residue. It never launches the browser under audit and never uses the network
+          except for the version lookup. A clean audit is not proof of safety, and content
+          encryption does not address the metadata layer at all.
+
+          The single-file executables need no runtime; every other package needs Node.js 18
+          or newer.
+          NOTES
+          # The file list is collected with find rather than written as artifacts/**. Bash does
+          # not enable globstar by default, so ** behaves as *, which expands to the two
+          # artifact directories rather than the files inside them -- gh would have been handed
+          # directories and the release would have had no assets.
+          mapfile -t assets < <(find artifacts -type f)
+          printf 'attaching %d assets\n' "${#assets[@]}"
+          # --repo is given explicitly, and --verify-tag is gone. The checkout is made with
+          # persist-credentials: false, so the origin remote carries no token; gh then resolves
+          # the repository from the token, and naming it removes the guesswork. Re-verifying the
+          # tag was a second chance to fail at something the run already knows: the tag is what
+          # started it.
+          if OUT=$(gh release create "$GITHUB_REF_NAME" \
+                     --repo "$GITHUB_REPOSITORY" \
+                     --title "Aragami $GITHUB_REF_NAME" \
+                     --notes-file notes.md \
+                     "${assets[@]}" 2>&1); then
+            printf '%s\n' "$OUT"
+          else
+            printf '%s\n' "$OUT"
+            # The message goes somewhere public. A failed step's log cannot be read without a
+            # token even on a public repository, so without this the only observable fact about
+            # a failure here is that there was one.
+            gh api "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" \
+              -f state=error \
+              -f context="aragami/release" \
+              -f "description=$(printf '%s' "$OUT" | tr '\n' ' ' | cut -c1-135)" \
+              -f "target_url=https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >/dev/null || true
+            exit 1
+          fi

@@ -1,0 +1,17 @@
+Package: aragami
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: all
+Depends: nodejs (>= 18)
+Maintainer: Nesarf <Nesarf@users.noreply.github.com>
+Homepage: https://github.com/Nesarf/Aragami
+Description: static posture audit for Tor Browser and Firefox
+ Aragami reads a browser install or profile and reports configuration posture and
+ static residue across five layers: build, transport, content/authorization,
+ metadata and endpoint.
+ .
+ It is read-only. It never launches the browser under audit and never uses the
+ network except for the version lookup. Every response carries a boundary notice
+ stating what the audit does not cover, because a clean audit is not proof of
+ safety, and content encryption does not address the metadata layer at all.

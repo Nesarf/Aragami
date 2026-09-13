@@ -1,0 +1,30 @@
+# Normalize line endings in the repository; checkouts use LF on every platform,
+# so cross-platform line-ending noise never pollutes diffs.
+* text=auto eol=lf
+
+# ...except batch files, which are the one exception and need it stated.
+#
+# cmd.exe parses an LF-only batch file almost correctly, which is the problem: it works
+# until someone adds a label or a goto, and then it fails in ways that are hard to
+# attribute. These launchers have neither today, so every one of them runs -- but the
+# launcher template in packaging/lib/stage-payload.ps1 already forces CRLF explicitly,
+# with a comment saying exactly this, and the copies committed here were coming out LF
+# because the rule above covers every text file. The two disagreed about the same files.
+# One line here means they do not have to.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary declarations: keeps future fixtures (test certificates, compressed samples)
+# from being treated as text.
+*.png binary
+*.jpg binary
+*.ico binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.exe binary
+*.pem binary
+*.der binary
+
+# Generated file: keep it out of language statistics
+package-lock.json linguist-generated=true

@@ -1,0 +1,10 @@
+{
+  "format": "aragami-emblem/1",
+  "cipher": "aes-256-gcm",
+  "kdf": "hkdf-sha256",
+  "key": "source-sha256",
+  "salt": "4030dd743a379a94b50cd68a3817c19f",
+  "nonce": "3330265e686fdc2ab88b2727",
+  "tag": "54329078937b595709932f8bef0caf24",
+  "payload": "2aR3ZdL/J6xiBBBYf8G/IHBs1vx4UhQwZfMiu7+fsMWlPapnzBlqOk4BbKAbiCv+9vQVhI3YDju6SD6zoWoaDoM9ydV7Y+afevKsX6IEpJTsopJPgErF0J5Bnlk65xsAGqePmJl7cOo7V2v/1hrTIv0q6WqCIlPpn/g3R5zqbV2cUCRGSJ+dI6HNsq9kJ2pN38fq4lfCC8QkKWVLhmwplVI+G2BmqjNhAo2wZq2drI8769cKPhwq4UA/nmVN4KuSwsiHYHqAr29KHn80aYWz+jV65cZoFwJ6whj6HoFdq6GIxfGFQhAXdOA/4Zu/zwk74ZWhRStbS34xKeslN5zV8tZBFFzuzRUvqJrtJ8MWdnptxsxIgM8PlpqCC2Kn5OYM1yewQt5gqNnlKcCMjWbvGgyfzIc/Cuu5MTtgFgoPf2DCVu6Js3MR+KqknpyCLAbRS+LNlfEn5HHSi//aYEobpwKSa097f0dmKo3/Sp/Yl+d1w+CbBMOppvHmwe/KemrDETMfrBb+Ci5hrSK54z237rfxawwPrecua2YKe90QAJ3T87mrsDnnCdjmb2l43XO2jKC2ILQo5diQOymbwINagGyBSHv5PD+Moo/Fb/7g8drNNuqpZ1+5mqNVKcVVfPwQ1zRxi5Wobzbct+NS2/2lGg3tQcMzg4Lg3F1YEBeO8wlijLAvRmIPSm4RDYrjfbL46wTdYDnw6dM="
+}

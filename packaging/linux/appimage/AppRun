@@ -1,0 +1,32 @@
+#!/bin/sh
+# AppRun entry point for the Aragami AppImage.
+#
+# AppImages are conventionally GUI applications; this one is a CLI, so it forwards arguments
+# and exit codes verbatim and does not touch stdout in any other way.
+HERE="$(dirname "$(readlink -f "$0")")"
+export ARAGAMI_HOME="${HERE}/usr/lib/aragami"
+
+# Which entry point to run is decided by the name the AppImage was invoked as, so that a
+# symlink called aragami-mcp starts the MCP server and one called aragami starts the CLI.
+#
+# The name has to come from ARGV0, not from $0. The AppImage runtime re-executes AppRun and
+# sets $0 to AppRun's own path, so a basename of $0 is always "AppRun" and the mcp branch
+# below could never be reached from an Image -- invoking a symlink named aragami-mcp printed
+# the CLI usage instead of speaking MCP. ARGV0 is the runtime's record of how the AppImage was
+# actually called. $0 is kept as the fallback for running AppRun directly out of an extracted
+# tree, where there is no runtime to set ARGV0.
+invoked="${ARGV0:-$0}"
+name="$(basename "$invoked")"
+
+# The MCP server is also reachable explicitly, because relying on the name of a symlink is a
+# trick that has to be discovered, and the AppImage is the one form where a user cannot simply
+# call a differently-named wrapper.
+if [ "${1:-}" = "--mcp" ]; then
+  shift
+  exec "$ARAGAMI_HOME/node" "${ARAGAMI_HOME}/dist/mcp.cjs" "$@"
+fi
+
+case "$name" in
+  *mcp*) exec "$ARAGAMI_HOME/node" "${ARAGAMI_HOME}/dist/mcp.cjs" "$@" ;;
+  *)     exec "$ARAGAMI_HOME/node" "${ARAGAMI_HOME}/dist/cli.cjs" "$@" ;;
+esac

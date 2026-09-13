@@ -1,0 +1,62 @@
+# Flatpak manifest for Aragami.
+#
+# The bundle carries its own Node runtime, because a Flatpak cannot assume the host has Node
+# and must not reach into it.
+#
+# That was the claim in this comment from the beginning, but nothing implemented it: the
+# manifest declared no Sdk extension and no Node was ever copied in, so the wrappers installed
+# by the module below called a bare `node` that does not exist inside org.freedesktop.Platform.
+# The package would have built cleanly and failed on first run with "node: not found". The
+# extension is declared now and its binary is copied into /app, which is what the comment said
+# all along -- the two had simply never been checked against each other.
+app-id: org.nesarf.Aragami
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  # Available on the 24.08 branch; verified rather than assumed, because the current branch on
+  # Flathub is 26.08 and an extension missing for this runtime would be a build failure that
+  # only shows up when the pipeline runs.
+  - org.freedesktop.Sdk.Extension.node22
+command: aragami
+
+finish-args:
+  # The whole point of the tool is reading a browser profile, which normally lives in the
+  # user's home directory. Read access is the narrowest thing that works.
+  - --filesystem=home:ro
+  - --share=network
+  - --talk-name=org.freedesktop.Flatpak
+
+modules:
+  - name: aragami
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib/aragami /app/bin
+      - cp -R dist /app/lib/aragami/
+      - cp README.md LICENSE Aragami /app/lib/aragami/
+      # The runtime the manifest promises. /usr/lib/sdk/<ext> is where an Sdk extension is
+      # mounted during the build; copying the binary into /app makes it part of the bundle
+      # rather than something the sandbox has to reach outside for.
+      - cp /usr/lib/sdk/node22/bin/node /app/lib/aragami/node
+      - chmod 755 /app/lib/aragami/node
+      - |
+        for pair in "aragami:cli.cjs:" "aragami-mcp:mcp.cjs:" "aragami-tor:cli.cjs:tor" \
+                    "aragami-tor-mcp:mcp.cjs:tor" "aragami-firefox:cli.cjs:firefox" \
+                    "aragami-firefox-mcp:mcp.cjs:firefox"; do
+          name=${pair%%:*}; rest=${pair#*:}; entry=${rest%%:*}; pin=${rest#*:}
+          { echo '#!/bin/sh'
+            [ -n "$pin" ] && echo "ARAGAMI_TARGET=$pin; export ARAGAMI_TARGET"
+            # The bundled interpreter, not one from PATH.
+            echo "exec /app/lib/aragami/node /app/lib/aragami/dist/$entry \"\$@\""
+          } > /app/bin/$name
+          chmod 755 /app/bin/$name
+        done
+    sources:
+      # Three levels up: this manifest lives at packaging/linux/flatpak/, so ../.. would reach
+      # packaging/ and not the repository root. It is built from where it lives rather than
+      # copied to the root first, because copying it moved the relative path somewhere else
+      # again -- ../.. from the root is two levels above the checkout entirely, which is what
+      # produced "Can't copy special file": the source resolved to / and flatpak-builder tried
+      # to package the whole filesystem.
+      - type: dir
+        path: ../../..

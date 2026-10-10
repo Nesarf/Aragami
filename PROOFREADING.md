@@ -453,6 +453,63 @@ The shape worth keeping: **a public advisory banner on a security tool costs mor
 advisory**, because it is the first thing a visitor sees, and the cheap fix is `npm audit fix`
 rather than an argument about reachability. Fix first, then measure which part was reachable and
 write that down.
+---
+
+## 9. Defects caught giving the installer an icon and a user interface
+
+### D50. A habit, three times over: a double hyphen is not legal inside an XML comment
+
+Every document in this project uses a double hyphen as a dash. XML comments cannot contain one, and
+the MSI template is XML. The build refused twice in one sitting, each time naming a line in the
+generated `.wxs` rather than the comment that caused it.
+
+Recorded because the failure mode is quiet in the wrong direction: the comment is *prose*, so
+nothing about writing it suggests a syntax rule, and the person most likely to paste one in is
+whoever is documenting the file. `test/selftest.mjs` now asserts that no comment in the template
+contains a double hyphen, which turns a build-time failure into a one-second local check.
+
+### D51. `UIRef` is not how a WiX 4+ extension's dialog set is referenced
+
+`<UIRef Id="WixUI_Minimal" />` is the WiX 3 form, and the form nearly every example still shows.
+Under WiX 5 it fails with `WIX0094: The identifier 'WixUI:WixUI_Minimal' is inaccessible due to its
+protection level`, which reads like a permissions problem and is a namespace one: WiX 4 moved
+extension elements into their own namespace, so the dialog set is an *element*.
+
+```xml
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <ui:WixUI Id="WixUI_Minimal" />
+```
+
+Found by decoding the namespace URI out of the extension assembly: its strings are UTF-16, so a
+plain `grep` over the DLL finds nothing and a UTF-16 decode finds it immediately.
+
+### D52. A guard that carried its own copy of the rule it was guarding
+
+The line-ending assertion added in the previous round listed the extensions it considered binary,
+and `.bmp` was not among them, so the two installer bitmaps were reported as text files with CRLF
+endings, a byte pair that occurs in them by chance. The fix is not to add `.bmp` to that list: it is
+to **read the list out of `.gitattributes`**, which is the file git itself obeys. Two copies of the
+same rule drift, which is a discipline entry this project already had.
+
+### D53. The extension had to be pinned, and a successful build proves less than it looks
+
+`wix extension add -g WixToolset.UI.wixext` installs the newest release, which was 7.0.0 against a
+WiX 5 toolchain; the resulting error complains about the extension's internal package layout rather
+than about versions. `pack-msi.ps1` therefore names `WixToolset.UI.wixext/5.0.2`.
+
+This is also why the negative control mattered more than the build. A **successful** build is not
+evidence that the committed images are the ones in the package: the UI extension ships default
+bitmaps under the same stream names, so `WixUI_Bmp_Banner` and `WixUI_Bmp_Dialog` would be present
+either way. Pointing the two variables at a nonexistent file makes the build fail with
+`WIX0103: Cannot find the Binary file ... referenced from src/ext/UI/wixlib/Common.wxs(6)`, which is
+what proves the extension consumes them, and therefore that the extracted package carries our
+artwork rather than its defaults.
+
+Also verified without installing, since installing needs elevation this session does not have: the
+built package's `Property` table carries `ARPPRODUCTICON = AragamiIcon`, its `Icon` table carries a
+stream of that name, and its `Dialog` table carries the nineteen dialogs of `WixUI_Minimal`.
+
 
 ---
 

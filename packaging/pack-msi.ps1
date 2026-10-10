@@ -94,19 +94,30 @@ foreach ($t in @($Target)) {
   Write-Host "Building aragami$suffix-$version.msi" -ForegroundColor Magenta
   Stage-AragamiPayload -Repo $repo -Root $root -Target $t | Out-Null
 
+  # The .wxs is written to the staging directory, so anything it references by a relative path
+  # would resolve against the wrong place. The icon and the two UI images are therefore passed in
+  # as absolute paths, the same way the payload is.
+  $wixAssets = Join-Path $PSScriptRoot 'wix'
   $wxs = $template.
     Replace('@NAME@', $p.Name).
     Replace('@DIRNAME@', $p.Dir).
     Replace('@VERSION@', $version).
     Replace('@UPGRADECODE@', $p.UpgradeCode).
     Replace('@PATHGUID@', $p.PathGuid).
-    Replace('@PAYLOAD@', $root)
+    Replace('@PAYLOAD@', $root).
+    Replace('@ICON@', (Join-Path $wixAssets 'aragami.ico')).
+    Replace('@UI_BANNER@', (Join-Path $wixAssets 'wix-banner.bmp')).
+    Replace('@UI_DIALOG@', (Join-Path $wixAssets 'wix-dialog.bmp'))
   $wxsPath = Join-Path $stage 'Aragami.wxs'
   Set-Content -LiteralPath $wxsPath -Value $wxs -Encoding UTF8
   New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
   # -pdbtype none: the .wixpdb is a build-time debug database, not a release artifact.
-  & $WixExe build -pdbtype none -o $msi $wxsPath
+  # The UI extension supplies WixUI_Minimal and the two image variables. It is named with its
+  # version because WiX resolves a bare name to the newest release, which is a newer major than the
+  # tool installed here -- that mismatch fails the build with a message about the extension's
+  # package layout rather than about versions.
+  & $WixExe build -pdbtype none -ext WixToolset.UI.wixext/5.0.2 -o $msi $wxsPath
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path $msi)) { Write-Host '  [!!] wix build failed' -ForegroundColor Red; exit 1 }
 
   Write-Host "  [ok] $msi  ($([Math]::Round((Get-Item $msi).Length / 1KB, 1)) KB)" -ForegroundColor Green

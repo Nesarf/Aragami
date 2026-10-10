@@ -17,6 +17,7 @@
 # Binary declarations: keeps future fixtures (test certificates, compressed samples)
 # from being treated as text.
 *.png binary
+*.bmp binary
 *.jpg binary
 *.ico binary
 *.zip binary

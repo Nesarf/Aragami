@@ -10,7 +10,8 @@
   The payload is the bundled CommonJS output plus the generated launchers, laid out
   identically to the portable package so the launchers' relative paths keep working.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
   <Package
       Name="@NAME@"
@@ -22,6 +23,24 @@
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of @NAME@ is already installed. Uninstall it first if you really need to go back." />
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- The icon shown in Apps & features, and on any shortcut Windows creates for the product.
+         ARPPRODUCTICON is the one place an installer's icon is seen by someone who is not already
+         running the program. -->
+    <Icon Id="AragamiIcon" SourceFile="@ICON@" />
+    <Property Id="ARPPRODUCTICON" Value="AragamiIcon" />
+
+    <!-- The installer's own two images. Both dimensions are fixed by the WiX UI extension (493x58
+         and 493x312) and it refuses to build if they are wrong, so they are committed rather than
+         generated at build time: a generated one that drifted by a pixel would fail the release
+         rather than the developer. -->
+    <WixVariable Id="WixUIBannerBmp" Value="@UI_BANNER@" />
+    <WixVariable Id="WixUIDialogBmp" Value="@UI_DIALOG@" />
+    <!-- The dialog set is an ELEMENT from the UI extension, not a UIRef. WiX 4 moved extension
+         elements into their own namespace, and referencing WixUI_Minimal through UIRef fails with
+         "inaccessible due to its protection level": the symbol resolves, but as the extension's
+         internal one rather than the element it publishes. -->
+    <ui:WixUI Id="WixUI_Minimal" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="@DIRNAME@" />

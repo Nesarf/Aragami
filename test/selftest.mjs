@@ -592,6 +592,48 @@ section("B14. built-in probes against a synthetic install");
     (res?.checks?.unknown ?? []).join(","));
 }
 
+section("B15. packaging templates are well formed");
+{
+  // Two traps that are only ever found by running a build, which happens on a runner rather than
+  // while editing, so both are asserted here.
+  //
+  // 1. An XML comment may not contain a double hyphen. Every prose file in this project uses "--"
+  //    as a dash, and copying that habit into a .wxs comment fails the MSI build with a message
+  //    about the source file rather than about the comment. It happened twice in one sitting.
+  // 2. Every @PLACEHOLDER@ in a template has to be substituted by the script that consumes it. A
+  //    missed one reaches the compiler literally, and the error names the placeholder rather than
+  //    the omission.
+  const wxs = fs.readFileSync(path.join(root, "packaging", "wix", "Aragami.wxs.in"), "utf8");
+  const badComments = [];
+  for (const m of wxs.matchAll(/<!--([\s\S]*?)-->/g)) {
+    const body = m[1];
+    if (body.includes("--") || body.trimEnd().endsWith("-")) badComments.push(body.trim().slice(0, 60));
+  }
+  check("no XML comment in the MSI template contains a double hyphen", badComments.length === 0, badComments.join(" | "));
+
+  const packer = fs.readFileSync(path.join(root, "packaging", "pack-msi.ps1"), "utf8");
+  const placeholders = [...new Set([...wxs.matchAll(/@([A-Z_]+)@/g)].map((m) => m[1]))].sort();
+  const unsubstituted = placeholders.filter((name) => !packer.includes(`Replace('@${name}@'`));
+  check("the MSI template has placeholders to substitute", placeholders.length >= 5, placeholders.join(","));
+  check("every MSI template placeholder is substituted by the build script",
+    unsubstituted.length === 0, unsubstituted.join(","));
+
+  // The two UI images have dimensions the WiX UI extension fixes, and it rejects the build rather
+  // than shrinking them. Checking the size here means a re-crop fails in a second, not on a runner.
+  for (const [file, w, h] of [["wix-banner.bmp", 493, 58], ["wix-dialog.bmp", 493, 312]]) {
+    const buf = fs.readFileSync(path.join(root, "packaging", "wix", file));
+    const isBmp = buf.slice(0, 2).toString("latin1") === "BM";
+    check(`${file} is a bitmap`, isBmp);
+    check(`${file} is ${w}x${h} as the UI extension requires`,
+      isBmp && buf.readInt32LE(18) === w && buf.readInt32LE(22) === h,
+      isBmp ? `${buf.readInt32LE(18)}x${buf.readInt32LE(22)}` : "not a bitmap");
+  }
+  const ico = fs.readFileSync(path.join(root, "packaging", "wix", "aragami.ico"));
+  check("the installer icon is a multi-size .ico",
+    ico.readUInt16LE(0) === 0 && ico.readUInt16LE(2) === 1 && ico.readUInt16LE(4) >= 4,
+    `images=${ico.readUInt16LE(4)}`);
+}
+
 section("B15. repository hygiene: line endings");
 {
   // The repository normalises every text file to LF in .gitattributes, with batch files as the one
@@ -600,6 +642,24 @@ section("B15. repository hygiene: line endings");
   // commit and a poor one for a habit, because the same write from a tool that did not stop would
   // have produced a diff touching every line of every file. This is the assertion that turns the
   // .gitattributes rule into something that fails locally rather than at commit time.
+  // The rules come FROM .gitattributes rather than being restated here. A second copy drifts from
+  // the file git actually obeys, and the first version of this guard had exactly that problem: it
+  // carried its own extension list, so a .bmp with a coincidental CR LF byte pair in it was
+  // reported as a text file with CRLF endings.
+  const LF = String.fromCharCode(10), CR = String.fromCharCode(13);
+  const attrs = fs.readFileSync(path.join(root, ".gitattributes"), "utf8")
+    .split(LF).map((l) => l.split(CR).join(""));
+  const binaryExt = [], crlfByDesign = [];
+  for (const line of attrs) {
+    const parts = line.trim().split(" ").filter(Boolean);
+    if (parts.length < 2 || !parts[0].startsWith("*.")) continue;
+    const ext = parts[0].slice(1).toLowerCase();
+    if (parts[1] === "binary") binaryExt.push(ext);
+    if (parts.length > 2 && parts[2].toLowerCase().includes("eol=crlf")) crlfByDesign.push(ext);
+  }
+  check(".gitattributes declares binary types to skip", binaryExt.length >= 5, binaryExt.join(","));
+  check(".gitattributes names the CRLF-by-design types", crlfByDesign.length >= 1, crlfByDesign.join(","));
+
   const walk = (dir, out = []) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       if (e.name === ".git" || e.name === "node_modules") continue;
@@ -609,13 +669,12 @@ section("B15. repository hygiene: line endings");
     }
     return out;
   };
-  const BINARY = [".png", ".pem", ".der", ".ico", ".zip", ".gz", ".7z"];
-  const CRLF_BY_DESIGN = [".cmd", ".bat"];
+  const CRLF = Buffer.from([13, 10]);
   const offenders = [];
   for (const full of walk(root)) {
     const ext = path.extname(full).toLowerCase();
-    if (BINARY.includes(ext) || CRLF_BY_DESIGN.includes(ext)) continue;
-    if (fs.readFileSync(full).includes(Buffer.from("\r\n"))) offenders.push(path.relative(root, full));
+    if (binaryExt.includes(ext) || crlfByDesign.includes(ext)) continue;
+    if (fs.readFileSync(full).includes(CRLF)) offenders.push(path.relative(root, full));
   }
   check("no tracked text file carries CRLF line endings", offenders.length === 0, offenders.join(", "));
   check("the batch launchers keep the CRLF .gitattributes asks for",

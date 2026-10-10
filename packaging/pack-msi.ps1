@@ -128,7 +128,8 @@ foreach ($t in @($Target)) {
     Replace('@PAYLOAD@', $root).
     Replace('@ICON@', (Join-Path $wixAssets 'aragami.ico')).
     Replace('@UI_BANNER@', (Join-Path $wixAssets 'wix-banner.bmp')).
-    Replace('@UI_DIALOG@', (Join-Path $wixAssets 'wix-dialog.bmp'))
+    Replace('@UI_DIALOG@', (Join-Path $wixAssets 'wix-dialog.bmp')).
+    Replace('@UI_LICENSE@', (Join-Path $wixAssets 'license.rtf'))
   $wxsPath = Join-Path $stage 'Aragami.wxs'
   Set-Content -LiteralPath $wxsPath -Value $wxs -Encoding UTF8
   New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -138,7 +139,12 @@ foreach ($t in @($Target)) {
   # version because WiX resolves a bare name to the newest release, which is a newer major than the
   # tool installed here -- that mismatch fails the build with a message about the extension's
   # package layout rather than about versions.
-  & $WixExe build -pdbtype none -ext WixToolset.UI.wixext/5.0.2 -o $msi $wxsPath
+  # -arch x64 is not cosmetic. Without it WiX builds an Intel (32-bit) package, and a 32-bit
+  # package cannot honour ProgramFiles64Folder: the directory resolves to "Program Files (x86)"
+  # and the product registers in the 32-bit half of the registry. Nothing in the repository could
+  # show this -- the build succeeds either way -- and CI only builds, so it took a real install to
+  # notice that the tool was landing beside the 32-bit programs.
+  & $WixExe build -pdbtype none -arch x64 -ext WixToolset.UI.wixext/5.0.2 -o $msi $wxsPath
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path $msi)) { Write-Host '  [!!] wix build failed' -ForegroundColor Red; exit 1 }
 
   Write-Host "  [ok] $msi  ($([Math]::Round((Get-Item $msi).Length / 1KB, 1)) KB)" -ForegroundColor Green

@@ -132,7 +132,7 @@ target-specific build from becoming a target-*locked* one.
 | Form | Runtime it needs | Verified by |
 |---|---|---|
 | Portable `.zip` + `.cmd` launchers | **Node.js >= 18 on the host** | Extracted, all six launchers run from a foreign working directory |
-| `.msi` (WiX, perMachine) | **Node.js >= 18 on the host** | `msiexec /i` real install (it now shows a wizard, so an unattended check needs `/qn`), registry entry, launcher run from a path containing spaces and parentheses, `msiexec /x` clean removal. The icon and the two dialog images are checked by reading them back out of the built package rather than by installing it |
+| `.msi` (WiX, perMachine, x64) | **Node.js >= 18 on the host** | `msiexec /i /qn` real install as an administrator: payload under `Program Files`, a registration the 64-bit registry view can see, the `bin` directory on the machine `PATH`, the launcher then run **by name from that PATH** and answering with the schema it should, and `msiexec /x /qn` leaving the machine unmodified -- the `PATH` is compared against a snapshot taken before the install rather than eyeballed. The installer's own images are checked by reading them back out of the built package |
 | Single-file `.exe` (Node SEA) | **nothing** | Run with Node removed from `PATH`; CLI and `--mcp` both answer |
 | `winget` manifests | (installs the MSI, so Node) | `winget validate` 3/3, recorded SHA matches the MSI it was generated from |
 | `npm` package | **Node.js >= 18** | `npm pack`, global install into a scratch prefix, both commands run |

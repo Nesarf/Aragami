@@ -525,6 +525,74 @@ local build meant a working release.
 The shape: **a prerequisite satisfied by hand is a prerequisite that will be missing somewhere
 else**, and the local build cannot tell you which of its inputs came from the sources and which
 came from your session.
+---
+
+## 10. Defects caught by installing the installer and looking at it
+
+Every one of these was invisible to the build, to the suites, and to reading the package's tables.
+They were found by running the thing on a machine with administrator rights and looking at the
+result, which is the only place an installer's mistakes are visible. The starting point was a
+correction from the user: this session *was* elevated, and the earlier claim that it was not had
+been assumed rather than measured.
+
+### D55. The dialog bitmap was full-bleed, so the wizard's text could not be read
+
+The WiX dialog set draws its text **on** the dialog bitmap. The first composition filled all of
+493x312 with the artwork, so on the page shown while the installer prepares, the words sat on a
+high-contrast illustration and were unreadable.
+
+The extension's own default answers what the layout expects: art on the **left**, plain light on
+the **right**. The same image is used both as a full background and as a side panel, and only a
+composition with a quiet half survives both. This is not discoverable from the schema or the
+documentation; it is discoverable in about four seconds by looking at a screenshot.
+
+### D56. Enabling the UI put a fake licence agreement in the installer
+
+`WixUI_Minimal` has a licence page, and the extension ships **Lorem ipsum** as its default text.
+Adding the dialog set therefore presented every user with a placeholder legal agreement, which is
+worse than having no licence page at all. `WixUILicenseRtf` now points at an RTF generated from
+`LICENSE`, and a check strips the RTF control words and compares the result with `LICENSE` word for
+word -- a substring test is the wrong tool, because re-wrapping splits phrases across lines.
+
+### D57. The left panel was anisotropically scaled, and the user saw it before any check did
+
+The panel was drawn by cropping a **square** out of the artwork and resizing it to 150x312, which
+compresses it horizontally to about 48%. The figure read as stretched vertically. Nothing in the
+build objects: both steps are valid image operations and the output is a valid bitmap of the
+required size.
+
+The fix is to take the crop **at the target aspect ratio** in the artwork's own pixels and scale it
+down uniformly, and the generator now asserts that both ratios agree rather than trusting that they
+do. The wider lesson is the one worth keeping: **the user caught this, not a test.** A visual
+property needs a visual check, and the cheap version of that check -- look at the thing once --
+should not be skipped just because the build is green.
+
+### D58. The package was x86, so it installed beside the 32-bit programs
+
+`wix build` defaults to an Intel (32-bit) package. A 32-bit package cannot honour
+`ProgramFiles64Folder`: the directory resolves to `Program Files (x86)` and the product registers in
+the 32-bit half of the registry. Nothing in the repository could show this -- the build succeeds, CI
+only builds, and the summary information stream that records the platform is not something anyone
+reads. It took an actual install.
+
+Worth recording about the process rather than only the defect: the README had claimed a real install
+had been verified, and its wording mentioned "a path containing spaces and parentheses". The
+parentheses were `Program Files (x86)`. **A symptom had been written down as a test case**, which is
+what happens when the observation and the expectation arrive at the same time.
+
+### D59. The verification script was wrong twice, in the ways verification scripts usually are
+
+- The launcher check failed with "'aragami' is not recognized". The installer had done its job; the
+  test ran in a shell whose `PATH` predated the install. A machine `PATH` change does not reach a
+  process that is already running, so the test was measuring the session rather than the product.
+- It asserted a `DisplayIcon` registry value. That is how a non-MSI entry advertises its icon; an
+  MSI product's Add/Remove icon comes from the `ARPPRODUCTICON` property and the cached package.
+  The absence was correct and the check was wrong.
+
+Both were fixed before anything was concluded from them, and the second is the reason the final
+script asserts the icon where it can actually be read -- the package's own tables -- instead of
+repeating a working check somewhere it does not work.
+
 
 
 

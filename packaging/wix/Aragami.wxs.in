@@ -36,6 +36,10 @@
          rather than the developer. -->
     <WixVariable Id="WixUIBannerBmp" Value="@UI_BANNER@" />
     <WixVariable Id="WixUIDialogBmp" Value="@UI_DIALOG@" />
+    <!-- WixUI_Minimal has a licence page, and the extension's default text for it is LOREM IPSUM.
+         Enabling the dialog set without this put a placeholder legal agreement in front of anyone
+         installing the tool. The RTF is generated from LICENSE so the two cannot diverge. -->
+    <WixVariable Id="WixUILicenseRtf" Value="@UI_LICENSE@" />
     <!-- The dialog set is an ELEMENT from the UI extension, not a UIRef. WiX 4 moved extension
          elements into their own namespace, and referencing WixUI_Minimal through UIRef fails with
          "inaccessible due to its protection level": the symbol resolves, but as the extension's

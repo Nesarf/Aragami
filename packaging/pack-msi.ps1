@@ -92,7 +92,7 @@ if ($installedExtensions -notmatch 'WixToolset\.UI\.wixext\s+5\.0\.2') {
 # Stable identities. Changing an UpgradeCode makes the new version install alongside the old
 # one instead of upgrading it, which is a silent, confusing failure -- so these are pinned.
 $products = @{
-  'all'     = @{ Name = 'Aragami (Tor and Firefox posture audit)'; UpgradeCode = 'ADE40F7B-E814-4EBC-A38E-757A911AE390'; PathGuid = 'D2A50295-051B-4CB2-8AD0-A39971254566'; Dir = 'Aragami' }
+  'all'     = @{ Name = 'Aragami (Tor and Firefox)'; UpgradeCode = 'ADE40F7B-E814-4EBC-A38E-757A911AE390'; PathGuid = 'D2A50295-051B-4CB2-8AD0-A39971254566'; Dir = 'Aragami' }
   'tor'     = @{ Name = 'Aragami for Tor Browser';                 UpgradeCode = '1A3E952F-4C37-43C0-830C-CAC1DF218825'; PathGuid = '94601A5D-1468-43E8-96CD-80E40D1D13DE'; Dir = 'Aragami' }
   'firefox' = @{ Name = 'Aragami for Firefox';                     UpgradeCode = '78195BBE-5742-48DF-B612-EA32A6007FC8'; PathGuid = 'C4D7ED7E-295C-4BCD-A748-3AC6EF84C5E8'; Dir = 'Aragami' }
 }

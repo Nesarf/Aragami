@@ -145,11 +145,16 @@ target-specific build from becoming a target-*locked* one.
 
 Four forms carry their own runtime and the rest use the host's, and the difference is worth
 knowing before picking one. Carrying a runtime costs size: the Linux tarball is ~170 KB, the
-MSI ~188 KB, and the self-contained ones are 16 MB (Flatpak) to 40 MB (AppImage) to 90 MB (the
+MSI ~1.1 MB, and the self-contained ones are 16 MB (Flatpak) to 40 MB (AppImage) to 90 MB (the
 single-file executable). A runtime that works anywhere cannot share libraries with the machine
 that built it. That is not a theoretical distinction: the AppImage used to copy the `node` that
 happened to be on `PATH`, which on a distribution that ships node as a shared library produced
 an artifact that only ran on machines with that library.
+
+The MSI is the outlier among the host-runtime forms, and it is worth knowing why it is five times
+the size of the tarball that carries the same code: 216 KB without an installer UI, 1140 KB with
+one. Of that increase, 535 KB is the two dialog images and 389 KB is the dialog set and its
+custom-action library. A wizard is not free, and an MSI is not automatically the small option.
 `packaging/linux/fetch-node.sh` fetches the official self-contained build, pinned to a version
 and checked against its published SHA256, and both the AppImage and the snap use it.
 

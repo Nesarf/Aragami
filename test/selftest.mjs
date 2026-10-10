@@ -95,12 +95,61 @@ section("A3. cmpVer version comparison");
 
 section("A4. tool contract");
 {
-  check("4 tools", TOOLS.length === 4, `actual ${TOOLS.length}`);
+  // The tool surface is asserted by PROPERTY rather than by count. A hardcoded number only
+  // says "something changed"; these say what the surface has to look like whatever changes.
+  check("the tool surface is non-empty", TOOLS.length > 0, `actual ${TOOLS.length}`);
+  check("tool names are unique", new Set(TOOLS.map((t) => t.name)).size === TOOLS.length);
+  check("every tool name is an aragami_ verb", TOOLS.every((t) => /^aragami_[a-z_]+$/.test(t.name)),
+    TOOLS.map((t) => t.name).join(", "));
+  check("the declared surface matches the catalog's size budget",
+    TOOLS.length >= 4 && TOOLS.length <= 12, `${TOOLS.length} tools`);
   for (const t of TOOLS) {
     check(`${t.name} has a description`, typeof t.description === "string" && t.description.length > 20);
     check(`${t.name} schema is an object`, t.inputSchema?.type === "object");
     check(`${t.name} execute is a function`, typeof t.execute === "function");
   }
+}
+
+/* ====================== A5. serialization ====================== */
+
+section("A5. safeStringify");
+{
+  // Sharing is not circularity. The audit response hands the same evidence object to both
+  // `findings` and `facts`, and the first implementation of this serializer tracked every
+  // object it had ever visited rather than the ancestors of the current path -- so the second
+  // view of a shared object came out as the literal string "[circular]" and the facts record
+  // silently became that string. Nothing failed; it was found by reading the output.
+  const shared = { a: 1 };
+  const both = JSON.parse(safeStringify({ x: shared, y: shared }));
+  check("a shared reference is serialized in full both times", both.x.a === 1 && both.y.a === 1, safeStringify({ x: shared, y: shared }));
+
+  const cycle = { n: 1 };
+  cycle.self = cycle;
+  check("a genuine cycle is marked, not followed",
+    JSON.parse(safeStringify(cycle)).self === "[circular]", safeStringify(cycle));
+
+  check("a cycle below the root is still caught", (() => {
+    const inner = {}; inner.me = inner;
+    return JSON.parse(safeStringify({ deep: { inner } })).deep.inner.me === "[circular]";
+  })());
+
+  check("BigInt becomes a string rather than throwing", JSON.parse(safeStringify({ b: 7n })).b === "7");
+
+  // toJSON must be honoured, or a Date serializes as an empty object.
+  check("toJSON is honoured like JSON.stringify does",
+    JSON.parse(safeStringify({ d: new Date("2026-01-02T03:04:05Z") })).d === "2026-01-02T03:04:05.000Z");
+  check("a toJSON that returns its own receiver does not recurse forever", (() => {
+    const selfish = { toJSON() { return this; } };
+    return safeStringify(selfish) === '"[circular]"';
+  })());
+
+  // undefined handling has to match the native serializer: dropped from objects, null in arrays.
+  const undef = JSON.parse(safeStringify({ u: undefined, arr: [undefined, 1] }));
+  check("undefined is dropped from objects", !("u" in undef));
+  check("undefined becomes null inside an array", undef.arr[0] === null && undef.arr[1] === 1);
+
+  check("plain nesting is unaffected", safeStringify({ a: { b: { c: [1, 2] } } }) === '{"a":{"b":{"c":[1,2]}}}');
+  check("indentation is passed through", safeStringify({ a: 1 }, 2).includes("\n"));
 }
 
 /* ====================== B. integration (shared fixtures) ====================== */
@@ -334,6 +383,21 @@ section("B8. version check");
   check("failure message carries diagnosable detail (not just \"fetch failed\")",
     typeof bad.error === "string" && bad.error.length > 8, bad.error);
   check("failure still carries boundary_notice", (bad.boundary_notice ?? []).length >= 4);
+
+  // The Firefox side of the local-version lookup has two fallbacks behind it: the installed
+  // application first, then the version the profile was last used with, then nothing. Passing
+  // an install path that holds no Firefox application drops it to the profile, which is the
+  // path a user hits after moving or uninstalling the browser without clearing the profile.
+  const ghostInstall = path.join(base, "no-firefox-here");
+  const ffLocal = await v.execute({ target: "firefox", install: ghostInstall, online: false });
+  check("firefox without an application falls back without throwing",
+    ffLocal.verdict === "unknown" && ffLocal.error === undefined, JSON.stringify(ffLocal).slice(0, 200));
+  check("the fallback reports a version or honestly reports none",
+    ffLocal.installed === null || typeof ffLocal.installed === "string",
+    String(ffLocal.installed));
+  check("the fallback says where the version came from, or that it has none",
+    ffLocal.local_source === null || typeof ffLocal.local_source === "string",
+    String(ffLocal.local_source));
 }
 
 section("B9. layer assessment discipline");
@@ -489,6 +553,28 @@ section("B13. traverser self-check");
     } catch (e) { out = String(e.stdout ?? "") + String(e.stderr ?? ""); }
     check(`${s} passes on its own`, ok, out.split("\n").filter((l) => l.includes("[FAIL]")).slice(0, 3).join(" | "));
   }
+}
+
+section("B14. built-in probe robustness (a path that does not exist)");
+{
+  // The audit is asked for things that are not there all the time -- a stale profile path, a
+  // profile on a disconnected drive. Every read behind the audit is wrapped, and this is the
+  // assertion that the wrapper is actually around the volume probe: statfs throws on a path it
+  // cannot resolve, and a thrown error there would take down the whole audit rather than one
+  // check.
+  const ghost = path.join(base, "definitely", "not", "here");
+  const auditTool = TOOLS.find((t) => t.name === "aragami_audit");
+  let res = null, threw = null;
+  try { res = await auditTool.execute({ target: "firefox", profile: ghost }); } catch (e) { threw = e; }
+  check("auditing a profile that does not exist does not throw", threw === null, String(threw && threw.message));
+  const probe = (res?.findings ?? []).find((f) => f.id === "disk-encryption");
+  check("the volume probe still reports when the path is missing", probe !== undefined);
+  check("a missing path is not reported as encrypted", probe?.severity !== "ok", String(probe?.severity));
+  check("the probe states a reason rather than a bare verdict",
+    typeof probe?.evidence?.reason === "string" && probe.evidence.reason.length > 0, JSON.stringify(probe?.evidence));
+  check("facts are still produced for a missing profile", res?.facts?.endpoint !== undefined);
+  check("conformance still holds on the error-tolerant path", res?.checks?.conformant === true,
+    JSON.stringify(res?.checks));
 }
 
 /* ====================== cleanup ====================== */

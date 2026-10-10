@@ -23,9 +23,20 @@ This section has to come first. **This tool is designed to say "no".**
 | **Transport layer** | Tor: bridge configuration, pluggable transport inventory, **uTLS fingerprint mimicry**, **domain fronting**, built-in vs. custom bridges, deprecated PTs, Quick Start timing. Firefox: proxy mode, DNS over HTTPS, content blocking, fingerprint resistance, cookie policy |
 | **Content/authorization layer** | Tor: onion service client authorization, whether `.onion` service private keys exist. Firefox: saved-login database, key material, client certificate store |
 | **Metadata layer** | Tor: the **guard set** in `state`, descriptor cache, PT state, profile first-use time, session checkpoints, browsing history. Firefox: history and cookies, per-site permissions, form history, site storage, telemetry client ID, account linkage, extensions |
-| **Endpoint layer** | Where the install or profile lives, user/temp directory residue, how many profiles exist, persistent vs. amnesic |
+| **Endpoint layer** | Where the install or profile lives, user/temp directory residue, how many profiles exist, persistent vs. amnesic, and whether the volume holding it is encrypted at rest (to the extent a static, unprivileged audit can tell -- see `disk-encryption` in `aragami_checks`) |
 
-**Read-only, entirely.** It does not start Tor, does not touch configuration, does not write any file. The only network action is the version check (which can be turned off).
+Two questions sit **outside** an audit, and both are served by looking at the surface rather
+than at your machine:
+
+- **What can this tool even see?** `aragami_checks` prints the declared check surface, one
+  entry per check, each stating what it reads and what it explicitly does not cover.
+- **Did anything move?** `aragami_baseline` captures the audit as a set of per-check
+  fingerprints and diffs a later run against it. Posture at rest and posture *drift* are
+  different questions, and only the second one catches a guard set quietly growing.
+
+**Read-only, entirely.** It does not start Tor, does not touch configuration, does not write
+any file -- a baseline is handed back to the caller to store, never written by the tool. The
+only network action is the version check (which can be turned off).
 
 ### What it does **not** do
 
@@ -193,6 +204,9 @@ node cli/index.mjs aragami_audit --human
 node cli/index.mjs aragami_audit --target firefox --human
 node cli/index.mjs aragami_audit --layer metadata --min_severity warn --human
 node cli/index.mjs aragami_version --human
+node cli/index.mjs aragami_checks --target tor --layer endpoint --human
+node cli/index.mjs aragami_baseline > baseline.json
+node cli/index.mjs aragami_baseline --mode diff --baseline_path baseline.json --human
 node cli/index.mjs aragami_layer_assess --metadata_sensitive true --realtime true --human
 ```
 
@@ -277,6 +291,40 @@ Key behaviors:
 - `counterpart_capability: email-only` -> points out that the ceiling on the approach is pressed very low
 - every assessment carries `does_not_cover`
 
+### `aragami_checks`
+Query the check surface as data. Lists every check this build performs, what each one reads,
+and -- per check -- **what that check does not cover**. It reads nothing and audits nothing.
+
+| Parameter | Description |
+|---|---|
+| `target` | `tor` \| `firefox` -- restrict to the checks one target produces |
+| `layer` | `all` \| `build` \| `transport` \| `crypto` \| `metadata` \| `endpoint` |
+| `id` | Look up a single check instead of listing |
+
+Key behaviors:
+- The surface is a declared catalog rather than something you can only learn by reading control flow, and each entry carries its own boundary text -- the shared `boundary_notice` deliberately does not enumerate per-check limits
+- An audit response reports the catalog version, a structural digest, and whether the run **conformed** to it (`unknown` ids, severities outside a check's declared set). A mismatch is a defect in this repository, never a statement about your machine
+- Also reports which checks did not fire. That is not an error: a check whose subject is absent does not fire
+
+### `aragami_baseline`
+Posture **drift**. A single audit answers "what does the configuration look like now"; it
+cannot answer "did anything move since last week". `mode=capture` records the current audit;
+`mode=diff` compares a stored record against a fresh audit.
+
+| Parameter | Description |
+|---|---|
+| `mode` | `capture` (default) \| `diff` |
+| `baseline` | A previously captured baseline; a capture *response* is accepted as well as a bare record |
+| `baseline_path` | Path to a baseline JSON file to read instead |
+| `target`, `install`, `profile` | Which target to audit, as in `aragami_audit` |
+
+Key behaviors:
+- **A baseline stores fingerprints, never evidence.** This is load-bearing: the audit's own argument is that state files, guard sets, key filenames and paths are the sensitive residue, so a baseline that recorded them would be a tidy copy of exactly what the tool tells you not to keep. Each entry keeps a digest of the evidence -- enough to detect a change, useless to anyone who obtains the file
+- The diff **refuses rather than guesses**: two records from different installs or profiles differ in almost every line, and their difference is not drift, so that is reported as `subject-mismatch` instead of a number that looks like an answer
+- A moved check catalog is **not** drift. When the surface changed, the comparison is restricted to the checks both records carry, and the difference is flagged separately
+- Accepts a capture response as well as a bare record, so redirecting a capture straight to a file works
+- Stateless: nothing is written anywhere. You keep the baseline and hand it back
+
 ---
 
 ## 5. The four-layer model
@@ -334,12 +382,15 @@ npm run test:emblem   # the seal only; needs no source work
 
 | Traverser | What it asserts | Scale |
 |---|---|---|
-| `test/selftest.mjs` | **Semantic correctness** (Tor target): should this branch report at all, and at what severity | **165 items** |
+| `test/selftest.mjs` | **Semantic correctness** (Tor target): should this branch report at all, and at what severity. Also owns the serializer: sharing is not circularity, `toJSON` is honoured, `undefined` behaves as it does natively | **193 items** |
 | `test/matrix.mjs` | **Contract invariance + robustness**: however it is called, the output contract does not break | **277 calls / 557 contract checks / 0 violations** |
 | `test/net.mjs` | **Protocol behavior**: local mock proxy / SOCKS5 / a real TLS handshake over the tunnel / echo / HTTP servers | **54 items** |
 | `test/firefox.mjs` | **Semantic correctness** (Firefox target): profile discovery, retention findings, and the credential-exposure line | **142 items** |
 | `test/emblem.mjs` | **The seal**: opening with the source work, and refusing a wrong source, an altered payload, tag or nonce, or a swapped container. Built on a synthetic stream, because the claim under test is that a machine *without* the work cannot open it | **94 items** |
-| `test/coverage.mjs` | **Evidence of the traversal**: which lines were never executed | **1608/1619 = 99.3%** on Windows; the Linux continuous integration runner is lower and is the figure the gate is set against |
+| `test/checks.mjs` | **The catalog against the code, in both directions**: every id the code emits is catalogued, every catalogued check has a producer, no two checks own the same fact slot, every entry states a boundary. Plus every branch of the volume probe, driven with supplied inputs so a branch reachable only on another platform still runs | **646 items** |
+| `test/baseline.mjs` | **Drift, and the privacy claim**: key-order-independent fingerprints, every refusal branch, and the assertion that a captured baseline contains **no** evidence -- built with a marked value that must not appear in the output. Tested over parsed values, not raw JSON, because `JSON.stringify` escapes backslashes and a substring test would pass for the wrong reason | **110 items** |
+| `test/mcp-smoke.mjs` | **The portable half**: a real MCP client sees exactly the core's tools, and every response names a versioned schema | **59 items** |
+| `test/coverage.mjs` | **Evidence of the traversal**: which lines were never executed | **2569/2580 = 99.6%** on Windows; the Linux continuous integration runner is lower and is the figure the gate is set against |
 
 Coverage is a property of the environment as much as of the code, and both numbers are given
 because quoting only the higher one would be misleading -- but the two environments differ by
@@ -376,12 +427,21 @@ The `matrix` contract includes: serializable, `boundary_notice` permanent, **no 
 8. **Tests must not pass for the wrong reason**. During one proofreading round, a blackhole-timeout test "passed" because the port was wrong, so it never actually reached the TLS timeout branch under test -- coverage is what dragged it into the light. Assertions must target the exact behavior, not "if there is an error, count it as a pass".
 9. **Fixtures are shared**. `test/fixtures.mjs` is the single source of truth. Inlining a copy means two sources of truth that drift apart on their own.
 10. **Filter parameters must be echoed back**. An unknown value falls back to the default, and the filter that actually took effect goes into `applied_filter` -- otherwise a caller who mistypes just gets an empty result and no idea why.
+11. **A boundary claim that is false in its first line is worse than no claim at all.** Every check therefore states its own limit in the catalog (`does_not_cover`), and a boundary that cannot be honoured must be removed rather than softened. The `disk-encryption` check exists in this spirit: on Windows a static, unprivileged audit genuinely cannot read a volume's encryption state, so it reports `undetermined` and names the command that answers it, instead of guessing in either direction.
+12. **A stored baseline must never contain evidence.** It keeps one fingerprint per check. A baseline that recorded guard names, key filenames or paths would be a tidy copy of exactly the residue this tool tells you not to keep -- and it would diff just as well, so nothing but this rule stops it.
+13. **Declared data and code must agree in both directions.** `test/checks.mjs` scans the sources and requires that every id the code emits is in the catalog *and* that every catalogued check has a producer. A table that nothing enforces is decoration.
+14. **Serialization must not confuse sharing with circularity.** The same evidence object is reachable from both `findings` and `facts`; a serializer that tracks every object ever visited rather than the ancestors of the current path turns the second view into `"[circular]"` and silently drops the data (see D35 in `PROOFREADING.md`).
+15. **Accept what the caller actually has.** `aragami_baseline` takes a capture *response* as well as a bare record, because redirecting a capture to a file is the obvious workflow and what lands in the file is the response.
 
 ---
 
 ## 9. Next steps
 
 - Interlock with a delivery-preparation workflow: before handing off a sensitive package, verify OnionShare availability and onion client authorization state
+
+- **Migrate the remaining checks onto the declarative path.** The catalog already distinguishes `kind: "bespoke"` from `kind: "builtin"`, and `disk-encryption` is the first check whose behaviour the catalog fully determines. The residue-style checks that only stat a path and report a size -- the `cache-*` family, `pt-state`, `places` -- are the next candidates, and moving them turns each into a data change rather than a code change. Deliberately not done in one step: the wording and severity of every existing check is pinned by the suites, and a big-bang rewrite would put that at risk for no behavioural gain.
+
+- **A second platform's worth of coverage.** The volume probe answers properly on Linux and honestly reports `undetermined` on Windows. Reading BitLocker state needs elevation, so if that is ever wanted it must arrive as an explicitly elevated companion rather than as a quiet widening of what this tool claims to see
 
 - Release pipeline (GitHub Release / npm) -- note that `npmjs.com` is hard to reach from mainland China, so **the Git channel is the primary channel**
 

@@ -6,12 +6,18 @@
 // CLI gets.
 
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
+
+// The expected tool set is read from the core rather than written down here. A hardcoded
+// count goes stale the moment a tool is added -- and it fails in the least useful way, as a
+// number that no longer matches, instead of as the property that actually matters: MCP must
+// expose exactly what the core declares, no more and no less.
+const { TOOLS } = await import(pathToFileURL(path.join(root, "lib", "core.mjs")).href);
 
 let pass = 0, fail = 0;
 function check(name, ok, detail = "") {
@@ -38,13 +44,19 @@ check("server name is correct", info?.name === "Aragami", JSON.stringify(info));
 console.log("\n== tools/list ==");
 const { tools } = await client.listTools();
 const names = tools.map((t) => t.name).sort();
-check("tool count is 4", tools.length === 4, `actual ${tools.length}: ${names.join(", ")}`);
-for (const want of ["aragami_audit", "aragami_env", "aragami_layer_assess", "aragami_version"]) {
+const coreNames = TOOLS.map((t) => t.name).sort();
+check("tool count matches the core", tools.length === TOOLS.length,
+  `mcp ${tools.length} vs core ${TOOLS.length}: ${names.join(", ")}`);
+check("MCP exposes exactly the core's tools, no more and no less",
+  names.join(",") === coreNames.join(","), `mcp [${names}] vs core [${coreNames}]`);
+for (const want of coreNames) {
   check(`contains ${want}`, names.includes(want));
 }
 for (const t of tools) {
   const hasSchema = t.inputSchema && t.inputSchema.type === "object";
   check(`${t.name} has a valid inputSchema`, hasSchema);
+  const core = TOOLS.find((c) => c.name === t.name);
+  check(`${t.name} description is passed through unchanged`, core?.description === t.description);
 }
 
 console.log("\n== tools/call: aragami_env ==");
@@ -107,6 +119,56 @@ const ls = layRes.structuredContent;
 check("recognizes the realtime/metadata hard conflict", (ls?.warnings ?? []).some((w) => w.includes("[HARD CONFLICT]")));
 check("does_not_cover is non-empty", (ls?.does_not_cover ?? []).length >= 4);
 check("refuses to over-promise", (ls?.verdict ?? "").includes("cannot be solved"));
+
+console.log("\n== tools/call: aragami_checks (the declared surface) ==");
+const chkRes = await client.callTool({ name: "aragami_checks", arguments: { target: "tor", layer: "endpoint" } });
+const cs = chkRes.structuredContent;
+check("checks reports the catalog digest", /^[0-9a-f]{16}$/.test(cs?.catalog_digest ?? ""), String(cs?.catalog_digest));
+check("checks narrows by target and layer",
+  (cs?.checks ?? []).length > 0 && (cs?.checks ?? []).every((c) => c.targets.includes("tor") && c.layer === "endpoint"));
+check("every listed check states its own boundary",
+  (cs?.checks ?? []).every((c) => typeof c.does_not_cover === "string" && c.does_not_cover.length >= 20));
+check("checks carries boundary_notice", (cs?.boundary_notice ?? []).length >= 4);
+const oneRes = await client.callTool({ name: "aragami_checks", arguments: { id: "no-such-check" } });
+check("checks reports a missing id honestly", oneRes.structuredContent?.found === false);
+const missRes = await client.callTool({ name: "aragami_checks", arguments: { id: "disk-encryption" } });
+check("checks finds a real id", missRes.structuredContent?.found === true);
+
+console.log("\n== tools/call: aragami_baseline (capture, then diff against itself) ==");
+const capRes = await client.callTool({ name: "aragami_baseline", arguments: {} });
+const cap = capRes.structuredContent;
+check("baseline captures", cap?.mode === "capture" && cap?.baseline?.schema === "aragami-baseline/1",
+  JSON.stringify(cap?.mode ?? cap?.error));
+if (cap?.baseline) {
+  check("a freshly captured baseline has no drift against the live state",
+    true); // established by the diff below
+  const difRes = await client.callTool({
+    name: "aragami_baseline",
+    arguments: { mode: "diff", baseline: cap.baseline },
+  });
+  const df = difRes.structuredContent;
+  check("diffing a capture against the same machine is no-drift", df?.verdict === "no-drift",
+    `${df?.verdict}: ${JSON.stringify(df?.summary)}`);
+  check("diff is comparable", df?.comparable === true);
+  check("diff carries boundary_notice", (df?.boundary_notice ?? []).length >= 4);
+  const badRes = await client.callTool({ name: "aragami_baseline", arguments: { mode: "diff", baseline: { schema: "nope" } } });
+  check("diff refuses an unusable baseline", badRes.structuredContent?.verdict === "invalid-baseline");
+  const noneRes = await client.callTool({ name: "aragami_baseline", arguments: { mode: "diff" } });
+  check("diff without a baseline refuses rather than inventing one", noneRes.structuredContent?.verdict === "no-baseline");
+} else {
+  check("a freshly captured baseline has no drift against the live state", false, "no baseline was captured");
+  check("diffing a capture against the same machine is no-drift", false, "no baseline was captured");
+  check("diff is comparable", false, "no baseline was captured");
+  check("diff carries boundary_notice", false, "no baseline was captured");
+  check("diff refuses an unusable baseline", false, "no baseline was captured");
+  check("diff without a baseline refuses rather than inventing one", false, "no baseline was captured");
+}
+
+console.log("\n== every response names its schema ==");
+for (const [label, res] of [["env", envRes], ["audit", auditRes], ["version", verRes], ["assess", layRes], ["checks", chkRes], ["baseline", capRes]]) {
+  check(`${label} response carries a versioned schema`, /^aragami-[a-z-]+\/\d+$/.test(res.structuredContent?.schema ?? ""),
+    String(res.structuredContent?.schema));
+}
 
 console.log("\n== an unknown tool must error ==");
 let unknownOk = false;

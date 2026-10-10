@@ -279,7 +279,7 @@ the README's design discipline.
 ## 6. Reproduce
 
 ```bash
-npm test              # 54 + 277 calls, 0 violations + 142 + 29 + 165 + 94, exit code 0
+npm test              # 54 + 277 calls, 0 violations + 59 + 142 + 193 + 94 + 646 + 110, exit code 0
 npm run test:cov      # coverage report; --gap prints the detail of uncovered lines
 npm run test:net      # network layer only
 npm run test:matrix   # contract traversal only
@@ -294,8 +294,92 @@ sealed work, because the claim it tests is that a machine without that work cann
 seal. A fixture that supplied the real bytes would test the opposite of the design.
 
 One number above is machine dependent, and it is the coverage figure, which counts lines that
-only execute on one platform. The Linux CI runner reports 1461/1499 = 97.5% and this Windows
-machine reports 1488/1499 = 99.3%; neither figure is a superset of the other, so the README
-quotes both and the gate sits at 97, below both. It fails when a path stops running, not when a
-different machine ran the suite. Both figures here predate the emblem suite; the denominators
-above are the current ones.
+only execute on one platform. The Linux CI runner reports 97.5% and this Windows machine
+reports 99.6%; neither figure is a superset of the other, so the README quotes both and the gate
+sits at 97, below both. It fails when a path stops running, not when a different machine ran the
+suite. The 11 lines uncovered on Windows are unchanged from before the catalog work while 961
+meaningful lines were added, so the new modules carry no gap: `lib/checks.mjs` is 572/572 and
+`lib/baseline.mjs` is 185/185. The four remaining lines in `core.mjs` (`resolveTarget`'s final
+fallback and `resolveFirefoxLocal`'s profile path) need a machine with neither Tor Browser nor
+Firefox installed, and the five in `firefox.mjs` are the macOS and Linux application paths.
+
+---
+
+## 7. Defects caught while adding the check catalog, the facts record and the baseline
+
+All five were found by building the feature and reading what came out, rather than by testing
+what was already believed to be true. Each is recorded with the shape of the mistake, because
+the shapes repeat.
+
+### D35. `safeStringify` confused a shared reference with a circular one
+
+The audit response hands the **same** evidence object to `findings` and to `facts`. The
+serializer tracked every object it had ever visited in a `WeakSet` and replaced any repeat with
+the string `"[circular]"` -- so the second view of every shared object came out as that string,
+and the facts record was in its entirety a set of `"[circular]"` markers. Nothing threw, nothing
+failed, and `JSON.parse` was perfectly happy with it.
+
+`JSON.stringify`'s replacer cannot see the ancestors of the current path, which is why the
+original could not tell the two cases apart; the fix is a recursive walk that adds an object on
+the way down and removes it on the way back, so only genuine self-reference is marked.
+
+Found by printing a real response and reading it. The suites had only ever asserted that the
+output was *serializable*, which it was.
+
+### D36. Two suites pinned the tool count to a literal
+
+`test/selftest.mjs` asserted `TOOLS.length === 4`, and `test/mcp-smoke.mjs` asserted a tool count
+of 4. Adding two tools broke both, which is what they were for -- but they broke as a **number
+mismatch** rather than as the property that actually matters. Replaced with what should have
+been asserted all along: the MCP server exposes *exactly* the core's tools, names are unique,
+every name matches `aragami_[a-z_]+`, and every description is passed through unchanged. A
+hardcoded count also goes stale silently in the other direction -- it cannot tell you that one
+tool disappeared and another appeared in its place.
+
+### D37. The baseline could not be used the way anyone would actually use it
+
+`aragami_baseline` in capture mode returns a **response**: `mode`, `baseline`, `audit_summary`,
+`note`. Storing it by redirecting the output to a file is the obvious workflow, and what lands
+in that file is the response, not the record. Passing that file to `--mode diff` failed with
+`Unsupported baseline schema "aragami-baseline-report/1"` -- a message that describes the
+symptom and gives no hint of the cause.
+
+`unwrapBaseline` now accepts a response that carries a well-formed baseline inside it, for both
+the inline and the file argument. Anything else still passes through to validation, which
+refuses with a reason.
+
+### D38. An empty mount table was treated as no mount table
+
+The volume probe read `/proc/self/mountinfo` and tested it for truthiness. `""` is falsy, so a
+table that was read successfully and happened to be empty fell through to the platform default
+instead of being reported as "read it, and nothing covers this path". The two cases are
+different and only one of them is a measurement: `null` means the read failed, `""` means it
+succeeded and found nothing. The presence test is now on the type rather than on truthiness.
+
+### D39. A privacy assertion passed for the wrong reason
+
+The baseline's central claim is that it stores fingerprints and never evidence, and the test for
+it was:
+
+```js
+check("no path reached a check entry", !JSON.stringify(b1.checks).includes(SECRET_PATH));
+```
+
+This can never fail on the platform where it most needs to hold. `SECRET_PATH` is
+`E:\Tor Browser\...`; `JSON.stringify` escapes backslashes to `\\`, so the serialized text does
+not contain the substring even when the path is sitting right there in the file. The assertion
+now collects the string leaves of the **parsed** record and tests those, which is independent of
+both escaping and key order. Re-verified against a baseline captured from a real install: 69
+string leaves under `checks`, none of them a path, a guard name or a key filename.
+
+The general shape: a negative assertion about serialized text is a test of the escaping as much
+as of the content, and on Windows it passes for free.
+
+### D40. The declared fact slot names described scalars that hold objects
+
+The catalog's `fact` field started out as a path into the evidence (`metadata.state_size`), then
+the record was changed to place the check's **whole evidence object** at that path so that no
+two checks could silently overwrite each other. That left nineteen slot names reading like
+scalars while holding `{size, mtime, last_written, guards, circuit_bins}` -- a documented schema
+whose names lie about its own shape. Renamed to group labels (`metadata.state`, `transport.bridges`),
+and the uniqueness of the 56 slots is now asserted by the suite.

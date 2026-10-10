@@ -142,6 +142,82 @@ function human(result, toolName) {
         L.push(c("gray", `      ${f.detail}`));
       }
     }
+  } else if (toolName === "aragami_checks") {
+    L.push(hr(`Check surface${result.target ? ` - ${result.target}` : ""}${result.layer ? ` / ${result.layer}` : ""}`));
+    L.push(c("gray", `  catalog v${result.catalog_version}  digest ${result.catalog_digest}  ` +
+      `${result.matched ?? 0} of ${result.total ?? 0} declared checks`));
+    if (result.found !== undefined) {
+      const cc = result.check;
+      if (!cc) {
+        L.push(c("red", `  x ${result.note ?? "no such check"}`));
+      } else {
+        L.push(`  ${c("bold", cc.id)}   ${c("gray", `${cc.layer}  targets ${cc.targets.join(", ")}  ${cc.kind}`)}`);
+        L.push(c("gray", `      allowed severities: ${cc.severities.join(", ")}`));
+        L.push(`      reads           ${cc.observes}`);
+        L.push(c("yellow", `      does not cover  ${cc.does_not_cover}`));
+        if (cc.fact) L.push(c("gray", `      fact slot       ${cc.fact}`));
+      }
+    } else {
+      const width = Math.max(0, ...(result.checks ?? []).map((x) => x.id.length));
+      for (const cc of result.checks ?? []) {
+        L.push(`  ${c("bold", cc.id.padEnd(width))} ${c("gray", cc.layer.padEnd(10))} ${c("gray", cc.severities.join("/"))}`);
+        L.push(c("gray", `      reads           ${cc.observes}`));
+        L.push(c("gray", `      does not cover  ${cc.does_not_cover}`));
+      }
+    }
+  } else if (toolName === "aragami_baseline") {
+    if (result.mode === "capture") {
+      if (result.error) {
+        L.push(c("red", `  x ${result.error}`));
+      } else {
+        const b = result.baseline ?? {};
+        L.push(hr("Baseline captured"));
+        L.push(`  Subject    ${c("bold", b.subject ?? "?")}`);
+        L.push(`  Target     ${b.target ?? "?"}   taken ${b.captured_at ?? "?"}`);
+        L.push(`  Recorded   ${c("bold", String(b.check_count ?? 0))} check(s)` +
+          c("gray", `   catalog ${b.catalog_digest ?? "?"}`));
+        const t = b.tally ?? {};
+        L.push("  " + ["critical", "warn", "info", "ok"].map((k) => c(SEV_STYLE[k][0], `${k} ${t[k] ?? 0}`)).join("   "));
+        L.push(c("gray", `  ${result.note ?? ""}`));
+      }
+    } else {
+      const vmap = {
+        "no-drift": ["green", "no drift since the baseline"],
+        drift: ["yellow", "the posture moved since the baseline"],
+        "subject-mismatch": ["red", "different subjects - not comparable"],
+        "target-mismatch": ["red", "different targets - not comparable"],
+        "invalid-baseline": ["red", "the baseline could not be used"],
+        "no-baseline": ["red", "no baseline was supplied"],
+      };
+      const [col, txt] = vmap[result.verdict] ?? ["gray", String(result.verdict ?? "?")];
+      L.push(hr("Posture drift"));
+      L.push(`  Verdict    ${c(col, txt)}`);
+      if (result.reason) L.push(c("red", `  x ${result.reason}`));
+      if (result.subjects) {
+        L.push(c("gray", `  baseline subject  ${result.subjects.baseline ?? "?"}`));
+        L.push(c("gray", `  current subject   ${result.subjects.current ?? "?"}`));
+      }
+      if (result.summary) {
+        const s = result.summary;
+        L.push("  " + [
+          c(s.added ? "yellow" : "gray", `added ${s.added}`),
+          c(s.removed ? "cyan" : "gray", `removed ${s.removed}`),
+          c(s.changed ? "yellow" : "gray", `changed ${s.changed}`),
+          c(s.severity_moved ? "red" : "gray", `severity moved ${s.severity_moved}`),
+          c("green", `unchanged ${s.unchanged}`),
+        ].join("   "));
+        if (result.baseline) L.push(c("gray", `  baseline taken ${result.baseline.captured_at ?? "?"} (${result.baseline.check_count} checks)`));
+        if (result.catalog_changed) L.push(c("yellow", "  ! the check catalog changed between the two records; only shared checks were compared"));
+        for (const id of result.added ?? []) L.push(`  ${c("yellow", "+")} ${id}  ${c("gray", "now fires")}`);
+        for (const id of result.removed ?? []) L.push(`  ${c("cyan", "-")} ${id}  ${c("gray", "no longer fires")}`);
+        for (const ch of result.changed ?? []) L.push(`  ${c("yellow", "~")} ${ch.id}  ${c("gray", `evidence changed (${ch.severity})`)}`);
+        for (const mv of result.severity_moved ?? []) {
+          const style = mv.direction === "worsened" ? "red" : "green";
+          L.push(`  ${c(style, mv.direction === "worsened" ? "!" : "v")} ${mv.id}  ${c(style, `${mv.from} -> ${mv.to}`)}`);
+        }
+        if (result.note) L.push(c("gray", `  ${result.note}`));
+      }
+    }
   } else if (toolName === "aragami_layer_assess") {
     L.push(hr("Layer assessment"));
     L.push(`  Recommended channel  ${c("bold", result.recommended_channel)}`);
@@ -203,11 +279,16 @@ Examples:
   node cli/index.mjs aragami_audit --layer metadata --min_severity warn --human
   node cli/index.mjs aragami_audit --target firefox --human
   node cli/index.mjs aragami_version --human
+  node cli/index.mjs aragami_checks --target tor --layer endpoint --human
+  node cli/index.mjs aragami_checks --id state-file --human
+  node cli/index.mjs aragami_baseline > baseline.json
+  node cli/index.mjs aragami_baseline --mode diff --baseline_path baseline.json --human
   node cli/index.mjs aragami_layer_assess --metadata_sensitive true --realtime true --human
 
 Notes: this tool reads files only, never starts Tor, and does not use the network
        (except aragami_version's public release lookup, which --online false disables).
-       A clean audit is not proof of safety.`);
+       A clean audit is not proof of safety. A baseline stores fingerprints, never
+       evidence, and comparing two of them is the only way to see posture DRIFT.`);
   process.exit(cmd ? 0 : 1);
 }
 

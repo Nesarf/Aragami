@@ -25,13 +25,15 @@
     "Aragami"
   ],
   "scripts": {
-    "test": "node test/net.mjs && node test/matrix.mjs && node test/mcp-smoke.mjs && node test/firefox.mjs && node test/selftest.mjs && node test/emblem.mjs",
+    "test": "node test/net.mjs && node test/matrix.mjs && node test/mcp-smoke.mjs && node test/firefox.mjs && node test/selftest.mjs && node test/emblem.mjs && node test/checks.mjs && node test/baseline.mjs",
     "test:core": "node test/selftest.mjs",
     "test:net": "node test/net.mjs",
     "test:matrix": "node test/matrix.mjs",
     "test:mcp": "node test/mcp-smoke.mjs",
     "test:firefox": "node test/firefox.mjs",
     "test:emblem": "node test/emblem.mjs",
+    "test:checks": "node test/checks.mjs",
+    "test:baseline": "node test/baseline.mjs",
     "test:cov": "node test/coverage.mjs",
     "audit": "node cli/index.mjs aragami_audit --human",
     "env": "node cli/index.mjs aragami_env --human",

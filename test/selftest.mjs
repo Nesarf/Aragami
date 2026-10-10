@@ -476,14 +476,21 @@ section("B11. proofreading regressions (locks down the fixed traps)");
   check("deprecated list contains both kinds", (dp?.evidence?.deprecated ?? []).length === 2, JSON.stringify(dp?.evidence));
 
   // trap 2: cache freshness used to be a tautological ternary, always emitting one sentence
-  const cache = (e1.findings ?? []).find((f) => f.id.startsWith("cache-") && f.evidence?.stale === true);
-  check("caches older than 90 days are marked stale", !!cache, JSON.stringify((e1.findings ?? []).map((f) => f.id)));
-  check("idle-cache wording mentions sitting unused for a long time", /Not updated for a long time/.test(cache?.detail ?? ""), cache?.detail);
+  //
+  // Staleness is read from the WORDING now rather than from an `evidence.stale` flag. The flag was
+  // dropped when the three residue evidence shapes were unified into one: a Firefox logins.json is
+  // not "stale", so staleness could not be part of a shape every residue check shares, and it is
+  // derivable from age_days plus the entry's own threshold anyway. Asserting the sentence is the
+  // stronger test regardless -- the sentence is what a reader acts on.
+  const caches = (e1.findings ?? []).filter((f) => f.id.startsWith("cache-"));
+  const cache = caches.find((f) => /Not updated for a long time/.test(f.detail ?? ""));
+  check("caches older than 90 days are described as idle", !!cache, JSON.stringify(caches.map((f) => f.id)));
+  check("an idle cache's evidence still carries the age that made it idle",
+    typeof cache?.evidence?.age_days === "number" && cache.evidence.age_days > 90, JSON.stringify(cache?.evidence));
 
   const fresh = (await T("aragami_audit").execute({ install: F.good })).findings
-    .find((f) => f.id.startsWith("cache-") && f.evidence?.stale === false);
-  check("fresh cache is marked stale=false", !!fresh);
-  check("fresh-cache wording differs from the idle one", /Updated recently/.test(fresh?.detail ?? ""), fresh?.detail);
+    .filter((f) => f.id.startsWith("cache-")).find((f) => /Updated recently/.test(f.detail ?? ""));
+  check("a freshly written cache is described as in use", !!fresh);
   check("the two wordings really are different", cache?.detail !== fresh?.detail);
 
   // trap 3: a 0-byte sessionCheckpoints used to be reported as "present"
@@ -583,6 +590,37 @@ section("B14. built-in probes against a synthetic install");
   check("conformance holds on a synthetic install", res?.checks?.conformant === true, JSON.stringify(res?.checks));
   check("every finding of the synthetic audit is catalogued", (res?.checks?.unknown ?? []).length === 0,
     (res?.checks?.unknown ?? []).join(","));
+}
+
+section("B15. repository hygiene: line endings");
+{
+  // The repository normalises every text file to LF in .gitattributes, with batch files as the one
+  // stated exception. Nothing enforced it until a script here wrote six files with CRLF endings and
+  // `git add` refused them with "CRLF would be replaced by LF" -- which is a fine outcome for a
+  // commit and a poor one for a habit, because the same write from a tool that did not stop would
+  // have produced a diff touching every line of every file. This is the assertion that turns the
+  // .gitattributes rule into something that fails locally rather than at commit time.
+  const walk = (dir, out = []) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (e.name === ".git" || e.name === "node_modules") continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full, out);
+      else out.push(full);
+    }
+    return out;
+  };
+  const BINARY = [".png", ".pem", ".der", ".ico", ".zip", ".gz", ".7z"];
+  const CRLF_BY_DESIGN = [".cmd", ".bat"];
+  const offenders = [];
+  for (const full of walk(root)) {
+    const ext = path.extname(full).toLowerCase();
+    if (BINARY.includes(ext) || CRLF_BY_DESIGN.includes(ext)) continue;
+    if (fs.readFileSync(full).includes(Buffer.from("\r\n"))) offenders.push(path.relative(root, full));
+  }
+  check("no tracked text file carries CRLF line endings", offenders.length === 0, offenders.join(", "));
+  check("the batch launchers keep the CRLF .gitattributes asks for",
+    walk(path.join(root, "bin")).filter((f) => f.endsWith(".cmd"))
+      .every((f) => fs.readFileSync(f).includes(Buffer.from("\r\n"))));
 }
 
 /* ====================== cleanup ====================== */

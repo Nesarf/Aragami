@@ -279,7 +279,7 @@ the README's design discipline.
 ## 6. Reproduce
 
 ```bash
-npm test              # 54 + 277 calls, 0 violations + 59 + 142 + 193 + 94 + 694 + 110, exit code 0
+npm test              # 54 + 277 calls, 0 violations + 60 + 142 + 195 + 94 + 735 + 113, exit code 0
 npm run test:cov      # coverage report; --gap prints the detail of uncovered lines
 npm run test:net      # network layer only
 npm run test:matrix   # contract traversal only
@@ -453,3 +453,79 @@ The shape worth keeping: **a public advisory banner on a security tool costs mor
 advisory**, because it is the first thing a visitor sees, and the cheap fix is `npm audit fix`
 rather than an argument about reachability. Fix first, then measure which part was reachable and
 write that down.
+
+---
+
+## 8. Defects caught migrating the rest of the checks into the catalog
+
+The second migration moved twenty more checks -- the four shape-only ones and the value-comparison
+ones -- taking declarative coverage from 17 of 58 to 37 of 58. Everything below was found by
+building it, and two of them are mistakes of mine rather than of the code that was there before.
+
+### D44. `min_count` defaulted to 1, so `max_count: 0` could never match
+
+`onion-auth-empty` expresses "the directory is configured but holds no keys" as `max_count: 0`. The
+probe checked the lower bound first, and the lower bound defaulted to 1 -- so the check could never
+fire, on any machine, ever. The suite caught it because that check is one the fixtures pin.
+
+The fix is one field (`min_count: 0`), but the shape is worth keeping: **a default that makes one
+of the two bounds unreachable turns a check into decoration**, and nothing about reading the entry
+suggests it. `test/checks.mjs` now asserts it directly for every catalog entry -- an entry asking
+for `max_count: 0` must say `min_count: 0`, and no entry may have `min_count > max_count`.
+
+### D45. A whole layer's built-in checks were never evaluated
+
+`bridge-blend` and `quickstart` are transport-layer checks. When they moved into the catalog they
+were removed from `auditTransport` -- and nothing added a transport-layer `evaluateBuiltins` call,
+because crypto, metadata and endpoint each had one and transport did not. Both checks simply
+stopped running. The suite caught it: two assertions that had passed for months went red.
+
+**A check that is catalogued but never reached is worse than a check that is missing**, because the
+catalog still claims it and `unfired` in the audit report quietly lists it as "did not fire" --
+which is indistinguishable from "fired and had nothing to say".
+
+### D46. The cookie-policy labels were written from memory, not copied
+
+`ff-cookie-behavior` renders a label per numeric preference value. Moving it into the catalog meant
+retyping the label table, and I typed a different one: `2: "block all third-party"` where the code
+says `"block all"`, `3: "block all"` where it says `"block from unvisited"`, `4: "block trackers"`
+where it says `"block cross-site trackers"`, `5: "block trackers and partition third-party"` where
+it says `"total cookie protection"`.
+
+Every one of them is a plausible description of the same setting, which is what makes this the
+dangerous kind of mistake: the output would have been *wrong but reasonable*, and no suite asserts
+the label text. It was caught by reading the block being replaced instead of recalling it.
+
+The rule this is an instance of: **when moving a literal, copy it.** A migration that retypes data
+is a migration that can silently change it, and the only defence is that the fidelity comparison at
+the end compares rendered output rather than structure.
+
+### D47. Two dead `dir-size` branches, one shadowing the other
+
+Writing the dir-size probe twice left two identical branch bodies in `evaluateOneBuiltin`, one
+behind the other. The first one won every time, so the second was unreachable -- and because the
+two differed in a single line (whether `file` was optional), the first also silently ignored a fix
+that had been made in the second. Coverage found them: 25 lines of `lib/checks.mjs` at 97.6%.
+
+### D48. The placeholder pattern rejected camelCase, so evidence kept its braces
+
+`renderTemplate` and `renderEvidence` matched `\{([a-z_]+)\}`, which is fine for
+`{trr_mode_label}` and wrong for `{cookieBehavior}`. The substitution silently did nothing and the
+finding shipped with `"cookieBehavior": "{cookieBehavior}"` as its evidence value. Both patterns now
+accept `[A-Za-z_][A-Za-z0-9_]*`.
+
+The shape: **a template engine with a narrower pattern than its inputs fails open**, producing
+output that looks like a template and reads as data. The suite now asserts that no rendered title
+or detail leaves a placeholder unresolved, which is the assertion that would have caught it without
+a fixture that happened to use a camelCase key.
+
+### D49. An earlier statement of the coverage was wrong
+
+The commit message for `57f3b99` says "Twenty-two of fifty-eight checks are declarative". The
+number was seventeen. It was written from memory while the count lived one command away, and the
+tests only assert the set -- nothing pinned the total, so nothing objected.
+
+Corrected here and in the README rather than quietly, because the count is the figure a reader uses
+to judge whether the migration is worth doing. It is now asserted: `test/checks.mjs` prints the
+builtin and total counts on every run, so the number in the prose can be checked against the number
+in the output.

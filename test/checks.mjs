@@ -42,7 +42,8 @@ const url = (p) => pathToFileURL(path.join(root, p)).href;
 const {
   CHECK_CATALOG, CATALOG_VERSION, CHECKS_SCHEMA, BUILTIN_PROBES, TARGETS,
   VOLUME_MAGICS, catalogDigest, checkById, checksFor, classifyVolumeEncryption,
-  declaredFactPaths, declaredProbes, evaluateBuiltins, evaluateOneBuiltin, factsFrom, renderTemplate, validateFindings,
+  declaredFactPaths, declaredProbes, evaluateBuiltins, evaluateOneBuiltin, factsFrom, renderTemplate,
+  validateFindings, VALUE_PREDICATES,
 } = await import(url("lib/checks.mjs"));
 const { LAYERS } = await import(url("lib/core.mjs"));
 
@@ -121,6 +122,24 @@ check("every catalogued check has a producer", unproduced.length === 0, unproduc
 
 const builtinCount = CHECK_CATALOG.filter((c) => c.kind === "builtin").length;
 check("catalog contains at least one builtin", builtinCount >= 1, `builtin=${builtinCount}`);
+
+// A built-in whose arguments can never be satisfied is a check that never fires, and it would
+// report as "unfired" forever with nothing to say why. Each of these was a real trap in the probe
+// defaults: min_count is 1, so an entry asking for max_count 0 has to say min_count 0 as well.
+for (const c of CHECK_CATALOG) {
+  if (c.kind !== "builtin") continue;
+  const a = c.probe_args ?? {};
+  if (a.max_count === 0 && a.min_count !== 0) {
+    check(`${c.id}: max_count 0 needs an explicit min_count 0`, false,
+      "the probe would reject before the upper bound is considered");
+  }
+  if (typeof a.min_count === "number" && typeof a.max_count === "number" && a.min_count > a.max_count) {
+    check(`${c.id}: count bounds are satisfiable`, false, `min ${a.min_count} > max ${a.max_count}`);
+  }
+  if (c.probe === BUILTIN_PROBES.PATH_LIST && !Array.isArray(a.paths)) {
+    check(`${c.id}: path-list names its candidates`, false, "no paths array");
+  }
+}
 
 /* ====================== 3. fact slots ====================== */
 
@@ -222,7 +241,11 @@ T("NaN statfsType ignored", { platform: "linux", root: "/x", mountInfo: null, st
 // path.join, which produces backslashes on Windows. Comparing raw strings would make this suite
 // pass on Linux and silently find nothing on Windows -- a platform-dependent test that looks
 // green on the machine that does not matter.
-const mkio = (files = {}, dirs = {}) => {
+//
+// All five io functions the probes may call are provided. The first version supplied only statOf
+// and listDir, so a json-field or dir-size check silently reported nothing and read as broken when
+// the fake context was the thing that was incomplete.
+const mkio = (files = {}, dirs = {}, docs = {}) => {
   const norm = (p) => String(p).replace(/\\/g, "/");
   return {
     statOf: (p) => {
@@ -230,14 +253,41 @@ const mkio = (files = {}, dirs = {}) => {
       return hit ? { size: hit.size, mtime: new Date(hit.mtime ?? "2026-01-01T00:00:00Z") } : null;
     },
     listDir: (p) => (dirs[norm(p)] ?? []).map((n) => ({ name: n, isFile: () => true })),
+    exists: (p) => norm(p) in files || norm(p) in dirs,
+    dirSize: (p) => (norm(p) in dirs ? (docs[norm(p)] ?? 1) : null),
+    readJson: (p) => docs[norm(p)] ?? null,
   };
 };
 const BASES = { install_root: "/tb", data_dir: "/tb/data", profile_dir: "/tb/profile" };
-const torCtx = (files = {}, io = mkio(files)) => ({
-  platform: "win32", root: "E:\\Tor Browser", mountInfo: null, statfsType: 0, bases: BASES, io,
+// A full configuration document by default, because a config-value check reads its keys out of one
+// and a context without it makes the check look broken when the fixture is what is incomplete.
+const TOR_PREFS = {
+  "torbrowser.settings.bridges.builtin_type": "snowflake",
+  "torbrowser.settings.bridges.source": "builtin",
+  "torbrowser.settings.quickstart.enabled": true,
+};
+const FF_PREFS = {
+  "privacy.resistFingerprinting": true,
+  "network.trr.mode": 3,
+  "network.trr.uri": "https://doh.example/dns-query",
+  "network.cookie.cookieBehavior": 5,
+  "signon.rememberSignons": true,
+  "toolkit.telemetry.enabled": false,
+  "datareporting.healthreport.uploadEnabled": false,
+  "browser.newtabpage.activity-stream.showSponsored": false,
+  "extensions.pocket.enabled": false,
+};
+// Extra bases and configuration documents are spread in rather than defaulted, because a check
+// gated on a base being present is only exercised by a context that actually carries it -- and the
+// first version of this helper accepted them as arguments it silently dropped, which made three
+// checks look broken when the context was the thing that was wrong.
+const torCtx = (files = {}, io = mkio(files), extraBases = {}, values = {}) => ({
+  platform: "win32", root: "E:\\Tor Browser", mountInfo: null, statfsType: 0,
+  bases: { ...BASES, ...extraBases }, io, prefs: TOR_PREFS, entries: {}, ...values,
 });
-const ffCtx = (files = {}, io = mkio(files)) => ({
-  platform: "win32", root: "C:\\p", mountInfo: null, statfsType: 0, bases: { profile_dir: "/p" }, io,
+const ffCtx = (files = {}, io = mkio(files), values = {}) => ({
+  platform: "win32", root: "C:\\p", mountInfo: null, statfsType: 0,
+  bases: { profile_dir: "/p" }, io, prefs: { ...FF_PREFS }, entries: null, ...values,
 });
 
 const torBuiltins = CHECK_CATALOG.filter((c) => c.kind === "builtin" && c.targets.includes("tor")).length;
@@ -245,15 +295,38 @@ const ffBuiltins = CHECK_CATALOG.filter((c) => c.kind === "builtin" && c.targets
 check("the catalog has both targets' builtins", torBuiltins > 1 && ffBuiltins > 1, `tor=${torBuiltins} ff=${ffBuiltins}`);
 
 // With nothing resolvable, a probe contributes nothing rather than throwing or inventing a
-// finding: only the volume probe can answer with no path to look at.
+// finding. The checks that can still answer are the ones that address no directory and whose
+// condition is "absent", which is a property of the catalog rather than a list kept here.
+const baseIndependent = (c) => c.kind === "builtin" && c.targets.includes("tor") && !(c.probe_args ?? {}).base;
 const bare = evaluateBuiltins("tor", { platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0 });
-check("builtins with no bases leave only the volume probe", bare.length === 1, `${bare.length}: ${bare.map((f) => f.id)}`);
-check("that survivor is the volume probe", bare[0].id === "disk-encryption");
+check("builtins with no context produce only catalogued checks",
+  bare.every((f) => catalogIds.has(f.id)), bare.map((f) => f.id).join(","));
+check("the base-independent volume probe still answers",
+  bare.some((f) => f.id === "disk-encryption"), bare.map((f) => f.id).join(","));
+check("the static statement still answers", bare.some((f) => f.id === "persistence"));
+check("nothing that needs a directory answers", bare.some((f) => f.id.startsWith("cache-")) === false);
+check("everything produced without context comes from a base-independent entry",
+  bare.every((f) => !(checkById(f.id).probe_args ?? {}).base),
+  bare.filter((f) => (checkById(f.id).probe_args ?? {}).base).map((f) => f.id).join(","));
+// A base-reading check needs the base map to have been supplied. "This target has no such
+// configuration" and "the caller described no target" are different answers, and only the first
+// one is a fact about the machine.
+check("a base-reading check with no base map is silent rather than guessing",
+  !bare.some((f) => f.id === "onion-auth-absent"), bare.map((f) => f.id).join(","));
+const emptyBases = evaluateBuiltins("tor", { platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0, bases: {}, entries: {} });
+check("an empty base map is read as not-configured",
+  emptyBases.some((f) => f.id === "onion-auth-absent"), emptyBases.map((f) => f.id).join(","));
+check("a configured auth directory silences the absent case",
+  !evaluateBuiltins("tor", torCtx({}, mkio(), { auth_dir: "/a" })).some((f) => f.id === "onion-auth-absent"));
 
 const noIo = evaluateBuiltins("tor", { platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0, bases: BASES });
-check("bases without an io layer still do not throw", noIo.length === 1, `${noIo.length}`);
+check("bases without an io layer still do not throw",
+  noIo.every((f) => catalogIds.has(f.id)), noIo.map((f) => f.id).join(","));
 
-// All residue files present: every applicable builtin should now fire.
+// All residue files present: the checks whose subject exists should fire, and the pairs that are
+// mutually exclusive by construction should each contribute exactly one member. Asserting a bare
+// total would be wrong -- `no-stray-traces` and `stray-traces` cannot both be true, and neither
+// can `onion-auth-empty` and `onion-auth-keys`, so the maximum is the total minus those two.
 const allFiles = {
   "/tb/data/cached-descriptors": { size: 1024 },
   "/tb/data/cached-microdescs": { size: 2048 },
@@ -263,8 +336,30 @@ const allFiles = {
   "/tb/profile/sessionCheckpoints.json": { size: 64 },
   "/tb/profile/places.sqlite": { size: 32768 },
 };
-const torAll = evaluateBuiltins("tor", torCtx(allFiles, mkio(allFiles, { "/tb/data/pt_state": ["a", "b", "c"] })));
-check("every tor builtin fires when its subject is present", torAll.length === torBuiltins, `${torAll.length} vs ${torBuiltins}`);
+const torAll = evaluateBuiltins("tor", torCtx(allFiles, mkio(allFiles, {
+  "/tb/data/pt_state": ["a", "b", "c"],
+  "/tb/data/keys": ["secret_id_key", "hostname"],
+  "/tb/auth": [],
+}, { "/tb/profile/times.json": { firstUse: "2026-01-01T00:00:00Z" } }),
+{ auth_dir: "/tb/auth", keys_dir: "/tb/data/keys" }, { entries: {} }));
+const firedIds = torAll.map((f) => f.id);
+// Explicit in both directions rather than a bare total: three pairs are mutually exclusive by
+// construction, so a count assertion would encode "total minus three" and say nothing about which.
+for (const id of ["cache-cached-descriptors", "cache-cached-microdescs", "cache-cached-microdescs.new",
+  "cache-cached-certs", "cache-cached-consensus", "pt-state", "session-checkpoints", "places",
+  "profile-times", "hs-keys", "onion-auth-empty", "no-stray-traces", "persistence", "disk-encryption"]) {
+  check(`a tor builtin fires when its subject is present: ${id}`, firedIds.includes(id), firedIds.join(","));
+}
+for (const id of ["stray-traces", "onion-auth-keys", "onion-auth-absent"]) {
+  check(`the exclusive partner stays silent: ${id}`, !firedIds.includes(id), firedIds.join(","));
+}
+// Named rather than counted. Three pairs cannot both fire, and one check reads a base the fixture
+// deliberately leaves out; listing what is absent says why, where "total minus three" says nothing.
+const torBuiltinIds = CHECK_CATALOG.filter((c) => c.kind === "builtin" && c.targets.includes("tor")).map((c) => c.id);
+const torNotFired = torBuiltinIds.filter((id) => !firedIds.includes(id)).sort();
+check("only tor checks whose subject is absent fail to fire",
+  JSON.stringify(torNotFired) === JSON.stringify(["onion-auth-absent", "onion-auth-keys", "stray-traces"]),
+  torNotFired.join(","));
 check("builtin finding carries its catalogued id", torAll.every((f) => catalogIds.has(f.id)));
 check("builtin finding carries the catalogued layer", torAll.every((f) => checkById(f.id).layer === f.layer));
 check("builtins restricted to a target list nothing for an unknown target", evaluateBuiltins("nope", {}) .length === 0);
@@ -285,8 +380,16 @@ const ffFiles = {
   "/p/formhistory.sqlite": { size: 700 },
   "/p/favicons.sqlite": { size: 800 },
 };
-const ffAll = evaluateBuiltins("firefox", ffCtx(ffFiles));
-check("every firefox builtin fires when its subject is present", ffAll.length === ffBuiltins, `${ffAll.length} vs ${ffBuiltins}`);
+const ffAll = evaluateBuiltins("firefox", ffCtx(ffFiles, mkio(ffFiles, {
+  "/p/storage/default": ["idb"],
+}, { "/p/times.json": { firstUse: "2026-01-01T00:00:00Z" } })));
+const ffFired = ffAll.map((f) => f.id);
+const ffBuiltinIds = CHECK_CATALOG.filter((c) => c.kind === "builtin" && c.targets.includes("firefox")).map((c) => c.id);
+const ffNotFired = ffBuiltinIds.filter((id) => !ffFired.includes(id)).sort();
+// ff-session needs a sessionstore-backups directory, which the fixture above omits on purpose so
+// that the absence path stays exercised.
+check("only firefox checks whose subject is absent fail to fire",
+  JSON.stringify(ffNotFired) === JSON.stringify(["ff-session"]), ffNotFired.join(","));
 
 /* ====================== 6b. the volume probe ====================== */
 
@@ -295,9 +398,10 @@ check("builtin severity: encrypted is ok", sevFor({ platform: "linux", root: "/h
 check("builtin severity: plain is warn", sevFor({ platform: "linux", root: "/opt", mountInfo: MI }) === "warn");
 check("builtin severity: unknown is info", sevFor({ platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0 }) === "info");
 check("builtin title matches the state",
-  bare[0].title.includes("could not be determined"));
+  bare.find((f) => f.id === "disk-encryption").title.includes("could not be determined"));
 check("builtin detail restates that it is about the whole volume",
-  evaluateBuiltins("tor", { platform: "linux", root: "/opt", mountInfo: MI })[0].detail.includes("every file on it"));
+  evaluateBuiltins("tor", { platform: "linux", root: "/opt", mountInfo: MI })
+    .find((f) => f.id === "disk-encryption").detail.includes("every file on it"));
 
 /* ====================== 6c. the path-residue probe ====================== */
 
@@ -315,30 +419,31 @@ const places = one(torCtx({ "/tb/profile/places.sqlite": { size: 32768, mtime: d
 check("places renders the title the code used to build by hand",
   places.title === "Browsing history database present (places.sqlite, 32.0 KB)", places.title);
 check("places keeps its warn severity", places.severity === "warn");
-check("places keeps the size-mtime evidence shape it had",
-  JSON.stringify(Object.keys(places.evidence).sort()) === '["mtime","size"]', JSON.stringify(places.evidence));
+check("places carries the one residue evidence shape",
+  JSON.stringify(Object.keys(places.evidence).sort()) === '["age_days","mtime","path","size"]', JSON.stringify(places.evidence));
+check("places names the file it read", places.evidence.path === "places.sqlite", String(places.evidence.path));
 
 const caches = evaluateBuiltins("tor", torCtx(allFiles)).filter((f) => f.id.startsWith("cache-"));
 check("all five descriptor caches report", caches.length === 5, `${caches.length}`);
 const desc = one(torCtx({ "/tb/data/cached-descriptors": { size: 1024, mtime: daysAgo(10) } }), "cache-cached-descriptors");
 check("a cache title names the cache, its size and its age",
   desc.title === "Descriptor cache cached-descriptors: 1.0 KB (updated 10 day(s) ago)", desc.title);
-check("a cache keeps the cache evidence shape including staleness",
-  JSON.stringify(Object.keys(desc.evidence).sort()) === '["age_days","mtime","size","stale"]', JSON.stringify(desc.evidence));
-check("a cache inside the staleness threshold is not marked stale", desc.evidence.stale === false && desc.evidence.age_days === 10,
-  JSON.stringify(desc.evidence));
+check("a cache carries the same residue evidence shape as everything else",
+  JSON.stringify(Object.keys(desc.evidence).sort()) === '["age_days","mtime","path","size"]', JSON.stringify(desc.evidence));
+check("a fresh cache reports its age rather than a staleness flag",
+  desc.evidence.age_days === 10, JSON.stringify(desc.evidence));
 check("a cache inside the threshold says the other thing",
   desc.detail.startsWith("Updated recently"), desc.detail.slice(0, 60));
 const old = one(torCtx({ "/tb/data/cached-certs": { size: 10, mtime: daysAgo(200) } }), "cache-cached-certs");
-check("a cache past the staleness threshold is marked stale", old.evidence.stale === true, JSON.stringify(old.evidence));
-check("a cache past the threshold says so", old.detail.startsWith("Not updated for a long time"), old.detail.slice(0, 60));
+check("a cache past the threshold says so in its detail rather than in a flag",
+  old.detail.startsWith("Not updated for a long time"), old.detail.slice(0, 60));
 check("the two detail variants are genuinely different", desc.detail !== old.detail);
 
 const logins = oneFf(ffCtx({ "/p/logins.json": { size: 100, mtime: daysAgo(10) } }), "ff-logins");
 check("a firefox residue title is the one the helper used to build",
   logins.title === "Saved passwords database present (100 B, written 10 day(s) ago)", logins.title);
-check("a firefox residue keeps the path-age evidence shape",
-  JSON.stringify(Object.keys(logins.evidence).sort()) === '["age_days","mtime","path","size"]', JSON.stringify(logins.evidence));
+check("a firefox residue carries the same shape as a Tor one",
+  JSON.stringify(Object.keys(logins.evidence).sort()) === JSON.stringify(Object.keys(places.evidence).sort()), JSON.stringify(logins.evidence));
 check("a firefox residue names the file in its evidence", logins.evidence.path === "logins.json");
 check("a firefox residue dates the file", logins.evidence.age_days === 10, String(logins.evidence.age_days));
 check("ff-logins keeps its warn severity", logins.severity === "warn");
@@ -349,12 +454,15 @@ check("an absent residue file reports nothing", one(torCtx({}), "places") === un
 check("a zero-byte residue file reports nothing", one(torCtx({ "/tb/profile/places.sqlite": { size: 0 } }), "places") === undefined);
 check("a zero-byte firefox residue file reports nothing",
   oneFf(ffCtx({ "/p/logins.json": { size: 0 } }), "ff-logins") === undefined);
-check("a stat that throws-like null is tolerated",
-  evaluateBuiltins("tor", torCtx({}, { statOf: () => null, listDir: () => [] })).length === 1);
+check("a stat that returns null is tolerated",
+  evaluateBuiltins("tor", torCtx({}, { statOf: () => null, listDir: () => [] }))
+    .every((f) => catalogIds.has(f.id)));
 check("a base directory that is missing contributes nothing",
-  evaluateBuiltins("tor", { platform: "win32", root: "x", bases: { data_dir: "" }, io: mkio(allFiles) }).length === 1);
+  !evaluateBuiltins("tor", { platform: "win32", root: "x", bases: { data_dir: "" }, io: mkio(allFiles), entries: {} })
+    .some((f) => f.id.startsWith("cache-")));
 check("an unknown base name contributes nothing",
-  evaluateBuiltins("tor", { platform: "win32", root: "x", bases: { nowhere: "/x" }, io: mkio(allFiles) }).length === 1);
+  !evaluateBuiltins("tor", { platform: "win32", root: "x", bases: { nowhere: "/x" }, io: mkio(allFiles), entries: {} })
+    .some((f) => f.id.startsWith("cache-")));
 
 /* ====================== 6d. the dir-entries probe ====================== */
 
@@ -367,6 +475,51 @@ check("dir-entries records the names, capped", (() => {
 })());
 check("an empty directory reports nothing", pt({ "/tb/data/pt_state": [] }) === undefined);
 check("a directory with one file reports one", pt({ "/tb/data/pt_state": ["only"] }).title === "pt_state retains 1 file(s)");
+
+/* ====================== 6d2. variant selection ====================== */
+
+// A variant set with no `always` means "only under these conditions", and no condition matching is
+// how a check stays silent when its subject is not configured. That path is the one a caller hits on
+// every machine that has not set the pref, so it is asserted rather than assumed.
+const noPrefs = { prefs: {}, entries: {} };
+check("a check with no matching variant produces nothing",
+  !evaluateBuiltins("firefox", ffCtx({}, mkio(), noPrefs)).some((f) => ["ff-rfp", "ff-doh", "ff-sponsored", "ff-telemetry-prefs"].includes(f.id)),
+  evaluateBuiltins("firefox", ffCtx({}, mkio(), noPrefs)).map((f) => f.id).join(","));
+check("a boolean check is silent when the pref is absent",
+  oneFf(ffCtx({}, mkio(), { prefs: {} }), "ff-primary-password") === undefined);
+check("a truthy check is silent when the pref is false rather than absent",
+  one(torCtx({}, mkio(), {}, { prefs: { "torbrowser.settings.bridges.builtin_type": "" } }), "bridge-blend") === undefined);
+check("that same check fires when the pref has a value",
+  one(torCtx({}, mkio(), {}, { prefs: { "torbrowser.settings.bridges.builtin_type": "snowflake" } }), "bridge-blend") !== undefined);
+
+// The predicate vocabulary is closed and each member is asserted directly, because a predicate that
+// no entry uses is a predicate nobody would notice breaking.
+const PV = { source: "prefs", keys: { k: "x" }, evidence: {} };
+const pv = (variant, prefs) => evaluateOneBuiltin(
+  { layer: "metadata", id: "probe-test", severities: ["info"], probe: BUILTIN_PROBES.CONFIG_VALUE,
+    probe_args: { ...PV, variants: [variant] }, title: "t", detail: "d" },
+  { prefs, io: mkio() });
+check("predicate absent matches only an unset key", pv({ key: "k", absent: true }, {}) !== null && pv({ key: "k", absent: true }, { x: 1 }) === null);
+check("predicate present matches a set key", pv({ key: "k", present: true }, { x: 0 }) !== null && pv({ key: "k", present: true }, {}) === null);
+check("predicate truthy rejects a falsy value", pv({ key: "k", truthy: true }, { x: "" }) === null && pv({ key: "k", truthy: true }, { x: "v" }) !== null);
+check("predicate is_true rejects a non-boolean", pv({ key: "k", is_true: true }, { x: 1 }) === null && pv({ key: "k", is_true: true }, { x: true }) !== null);
+check("predicate is_false rejects a non-boolean", pv({ key: "k", is_false: true }, { x: 0 }) === null && pv({ key: "k", is_false: true }, { x: false }) !== null);
+check("predicate one_of compares as strings", pv({ key: "k", one_of: [2, 3] }, { x: "2" }) !== null && pv({ key: "k", one_of: [2, 3] }, { x: 4 }) === null);
+check("predicate one_of needs the key present", pv({ key: "k", one_of: [2] }, {}) === null);
+check("predicate any_true needs one true", pv({ any_true: true }, { x: false }) === null && pv({ any_true: true }, { x: true }) !== null);
+check("predicate all_false needs every key explicitly false",
+  pv({ all_false: true }, { x: false }) !== null && pv({ all_false: true }, {}) === null && pv({ all_false: true }, { x: true }) === null);
+check("predicate any_present needs one key set", pv({ any_present: true }, {}) === null && pv({ any_present: true }, { x: 0 }) !== null);
+check("an unrecognised variant matches nothing rather than everything",
+  pv({ key: "k", no_such_predicate: true }, { x: 1 }) === null);
+check("`always` is the default variant",
+  pv({ always: true }, {}) !== null);
+check("the first matching variant wins",
+  evaluateOneBuiltin({ layer: "metadata", id: "probe-test", severities: ["info"], probe: BUILTIN_PROBES.CONFIG_VALUE,
+    probe_args: { ...PV, variants: [{ key: "k", present: true, severity: "warn", title: "first" }, { always: true, title: "second" }] },
+    title: "t", detail: "d" }, { prefs: { x: 1 }, io: mkio() }).title === "first");
+check("the predicate vocabulary is the closed set the module documents",
+  VALUE_PREDICATES.length === 9 && VALUE_PREDICATES.includes("any_present"), VALUE_PREDICATES.join(","));
 
 /* ====================== 6e. templates ====================== */
 

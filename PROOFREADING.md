@@ -279,7 +279,7 @@ the README's design discipline.
 ## 6. Reproduce
 
 ```bash
-npm test              # 54 + 277 calls, 0 violations + 59 + 142 + 193 + 94 + 646 + 110, exit code 0
+npm test              # 54 + 277 calls, 0 violations + 59 + 142 + 193 + 94 + 694 + 110, exit code 0
 npm run test:cov      # coverage report; --gap prints the detail of uncovered lines
 npm run test:net      # network layer only
 npm run test:matrix   # contract traversal only
@@ -299,7 +299,7 @@ reports 99.6%; neither figure is a superset of the other, so the README quotes b
 sits at 97, below both. It fails when a path stops running, not when a different machine ran the
 suite. The 11 lines uncovered on Windows are unchanged from before the catalog work while 961
 meaningful lines were added, so the new modules carry no gap: `lib/checks.mjs` is 572/572 and
-`lib/baseline.mjs` is 185/185. The four remaining lines in `core.mjs` (`resolveTarget`'s final
+`lib/baseline.mjs` is 185/185 and `lib/checks.mjs` is 707/707. The four remaining lines in `core.mjs` (`resolveTarget`'s final
 fallback and `resolveFirefoxLocal`'s profile path) need a machine with neither Tor Browser nor
 Firefox installed, and the five in `firefox.mjs` are the macOS and Linux application paths.
 
@@ -383,3 +383,37 @@ two checks could silently overwrite each other. That left nineteen slot names re
 scalars while holding `{size, mtime, last_written, guards, circuit_bins}` -- a documented schema
 whose names lie about its own shape. Renamed to group labels (`metadata.state`, `transport.bridges`),
 and the uniqueness of the 56 slots is now asserted by the suite.
+
+### D41. Sixteen checks moved from code into the catalog, and the suites could not see it
+
+The residue-style checks -- five `cache-*`, `pt-state`, `session-checkpoints`, `places`, the eight
+Firefox residue files -- were rewritten as catalog entries driven by two new probes
+(`path-residue`, `dir-entries`). The risk in a change like this is not that it breaks loudly; it
+is that the numbers move and nobody notices which characters changed. Three things guard it:
+
+1. The suites pin the specific evidence keys and per-id severities of the migrated checks, so a
+   changed shape fails immediately rather than looking plausible.
+2. `test/checks.mjs` asserts the **literal** rendered title of a migrated check, with the age
+   pinned by dating a fake file a fixed offset back from now -- a hardcoded day count would have
+   been a test that breaks on its own tomorrow, which is how the first version of this assertion
+   was written.
+3. The previous commit is the pre-migration code, so both can be run against the same real
+   installation and compared field by field. `git worktree add --detach` at `HEAD` and an
+   `aragami_audit` from each side gives: **Tor 23/23 and Firefox 21/21 findings identical in
+   layer, severity, id, title, detail and evidence.** The only difference is the position of the
+   migrated checks among findings of equal severity on the Firefox side, because they now run at
+   the end of their auditor instead of where the `residue()` calls sat. Every field is the same;
+   the array order within one severity is not, and the ordering tiebreak is an accident of
+   assembly rather than a contract -- named in README section 9 rather than papered over.
+
+### D42. The probe dispatcher guarded only its first branch
+
+`evaluateOneBuiltin` was written as three branches on `entry.probe`. The first used `entry?.probe`
+and the rest used `entry.probe`, so a null entry -- which the catalog tests construct, because the
+catalog is data and data can be wrong -- reached the second branch and threw `Cannot read
+properties of null`. Caught by the suite that was written for the new export, one call after the
+export was added. The guard is now a single early return at the top of the function, with a
+comment saying why per-branch guarding was the mistake.
+
+The general shape: optional chaining applied to the first use of a value and not the rest is a
+pattern that reads as defensive and is not, because it moves the failure rather than preventing it.

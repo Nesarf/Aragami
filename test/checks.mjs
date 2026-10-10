@@ -42,7 +42,7 @@ const url = (p) => pathToFileURL(path.join(root, p)).href;
 const {
   CHECK_CATALOG, CATALOG_VERSION, CHECKS_SCHEMA, BUILTIN_PROBES, TARGETS,
   VOLUME_MAGICS, catalogDigest, checkById, checksFor, classifyVolumeEncryption,
-  declaredFactPaths, declaredProbes, evaluateBuiltins, factsFrom, validateFindings,
+  declaredFactPaths, declaredProbes, evaluateBuiltins, evaluateOneBuiltin, factsFrom, renderTemplate, validateFindings,
 } = await import(url("lib/checks.mjs"));
 const { LAYERS } = await import(url("lib/core.mjs"));
 
@@ -215,21 +215,196 @@ T("NaN statfsType ignored", { platform: "linux", root: "/x", mountInfo: null, st
 
 /* ====================== 6. built-in evaluation ====================== */
 
-const bi = evaluateBuiltins("tor", { platform: "win32", root: "E:\\Tor Browser", mountInfo: null, statfsType: 0 });
-check("builtins produce the catalogued count for tor", bi.length === builtinCount, `${bi.length} vs ${builtinCount}`);
-check("builtin finding carries its catalogued id", bi.every((f) => catalogIds.has(f.id)));
-check("builtin finding carries the catalogued layer", bi.every((f) => checkById(f.id).layer === f.layer));
-check("builtins restricted to a target list nothing for an unknown target", evaluateBuiltins("nope", {}).length === 0);
+// A fake filesystem, so every probe branch is reachable without touching the real one and
+// without depending on what happens to be installed on the machine running the suite.
+//
+// The keys are normalised to forward slashes because the probe joins its base and file with
+// path.join, which produces backslashes on Windows. Comparing raw strings would make this suite
+// pass on Linux and silently find nothing on Windows -- a platform-dependent test that looks
+// green on the machine that does not matter.
+const mkio = (files = {}, dirs = {}) => {
+  const norm = (p) => String(p).replace(/\\/g, "/");
+  return {
+    statOf: (p) => {
+      const hit = files[norm(p)];
+      return hit ? { size: hit.size, mtime: new Date(hit.mtime ?? "2026-01-01T00:00:00Z") } : null;
+    },
+    listDir: (p) => (dirs[norm(p)] ?? []).map((n) => ({ name: n, isFile: () => true })),
+  };
+};
+const BASES = { install_root: "/tb", data_dir: "/tb/data", profile_dir: "/tb/profile" };
+const torCtx = (files = {}, io = mkio(files)) => ({
+  platform: "win32", root: "E:\\Tor Browser", mountInfo: null, statfsType: 0, bases: BASES, io,
+});
+const ffCtx = (files = {}, io = mkio(files)) => ({
+  platform: "win32", root: "C:\\p", mountInfo: null, statfsType: 0, bases: { profile_dir: "/p" }, io,
+});
+
+const torBuiltins = CHECK_CATALOG.filter((c) => c.kind === "builtin" && c.targets.includes("tor")).length;
+const ffBuiltins = CHECK_CATALOG.filter((c) => c.kind === "builtin" && c.targets.includes("firefox")).length;
+check("the catalog has both targets' builtins", torBuiltins > 1 && ffBuiltins > 1, `tor=${torBuiltins} ff=${ffBuiltins}`);
+
+// With nothing resolvable, a probe contributes nothing rather than throwing or inventing a
+// finding: only the volume probe can answer with no path to look at.
+const bare = evaluateBuiltins("tor", { platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0 });
+check("builtins with no bases leave only the volume probe", bare.length === 1, `${bare.length}: ${bare.map((f) => f.id)}`);
+check("that survivor is the volume probe", bare[0].id === "disk-encryption");
+
+const noIo = evaluateBuiltins("tor", { platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0, bases: BASES });
+check("bases without an io layer still do not throw", noIo.length === 1, `${noIo.length}`);
+
+// All residue files present: every applicable builtin should now fire.
+const allFiles = {
+  "/tb/data/cached-descriptors": { size: 1024 },
+  "/tb/data/cached-microdescs": { size: 2048 },
+  "/tb/data/cached-microdescs.new": { size: 4096 },
+  "/tb/data/cached-certs": { size: 512 },
+  "/tb/data/cached-consensus": { size: 8192 },
+  "/tb/profile/sessionCheckpoints.json": { size: 64 },
+  "/tb/profile/places.sqlite": { size: 32768 },
+};
+const torAll = evaluateBuiltins("tor", torCtx(allFiles, mkio(allFiles, { "/tb/data/pt_state": ["a", "b", "c"] })));
+check("every tor builtin fires when its subject is present", torAll.length === torBuiltins, `${torAll.length} vs ${torBuiltins}`);
+check("builtin finding carries its catalogued id", torAll.every((f) => catalogIds.has(f.id)));
+check("builtin finding carries the catalogued layer", torAll.every((f) => checkById(f.id).layer === f.layer));
+check("builtins restricted to a target list nothing for an unknown target", evaluateBuiltins("nope", {}) .length === 0);
+
+// The layer option, which is how the auditors ask for their own share.
+const metaOnly = evaluateBuiltins("tor", torCtx(allFiles, mkio(allFiles, { "/tb/data/pt_state": ["a"] })), { layer: "metadata" });
+check("the layer option narrows the set", metaOnly.length > 0 && metaOnly.every((f) => f.layer === "metadata"), `${metaOnly.length}`);
+check("the layer option excludes other layers", !metaOnly.some((f) => f.id === "disk-encryption"));
+check("all means no layer filter", evaluateBuiltins("tor", torCtx(allFiles), { layer: "all" }).length >= metaOnly.length);
+
+const ffFiles = {
+  "/p/logins.json": { size: 100 },
+  "/p/key4.db": { size: 200 },
+  "/p/cert9.db": { size: 300 },
+  "/p/places.sqlite": { size: 400 },
+  "/p/cookies.sqlite": { size: 500 },
+  "/p/permissions.sqlite": { size: 600 },
+  "/p/formhistory.sqlite": { size: 700 },
+  "/p/favicons.sqlite": { size: 800 },
+};
+const ffAll = evaluateBuiltins("firefox", ffCtx(ffFiles));
+check("every firefox builtin fires when its subject is present", ffAll.length === ffBuiltins, `${ffAll.length} vs ${ffBuiltins}`);
+
+/* ====================== 6b. the volume probe ====================== */
 
 const sevFor = (input) => evaluateBuiltins("tor", input).find((f) => f.id === "disk-encryption")?.severity;
 check("builtin severity: encrypted is ok", sevFor({ platform: "linux", root: "/home/u", mountInfo: MI }) === "ok");
 check("builtin severity: plain is warn", sevFor({ platform: "linux", root: "/opt", mountInfo: MI }) === "warn");
 check("builtin severity: unknown is info", sevFor({ platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0 }) === "info");
 check("builtin title matches the state",
-  evaluateBuiltins("tor", { platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0 })[0].title.includes("could not be determined"));
+  bare[0].title.includes("could not be determined"));
 check("builtin detail restates that it is about the whole volume",
   evaluateBuiltins("tor", { platform: "linux", root: "/opt", mountInfo: MI })[0].detail.includes("every file on it"));
-check("builtin runs for firefox too", evaluateBuiltins("firefox", { platform: "win32", root: "C:\\p", mountInfo: null, statfsType: 0 }).length === builtinCount);
+
+/* ====================== 6c. the path-residue probe ====================== */
+
+const one = (ctx, id) => evaluateBuiltins("tor", ctx).find((f) => f.id === id);
+const oneFf = (ctx, id) => evaluateBuiltins("firefox", ctx).find((f) => f.id === id);
+
+// The exact rendering of migrated checks, asserted literally. This is the property that makes
+// the migration trustworthy: the findings a caller sees must be the ones it saw before the
+// checks moved into the catalog, character for character.
+//
+// The age is pinned by dating the fake file a fixed offset back from now rather than by
+// hardcoding a number -- a hardcoded day count is a test that breaks on its own tomorrow.
+const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString();
+const places = one(torCtx({ "/tb/profile/places.sqlite": { size: 32768, mtime: daysAgo(10) } }), "places");
+check("places renders the title the code used to build by hand",
+  places.title === "Browsing history database present (places.sqlite, 32.0 KB)", places.title);
+check("places keeps its warn severity", places.severity === "warn");
+check("places keeps the size-mtime evidence shape it had",
+  JSON.stringify(Object.keys(places.evidence).sort()) === '["mtime","size"]', JSON.stringify(places.evidence));
+
+const caches = evaluateBuiltins("tor", torCtx(allFiles)).filter((f) => f.id.startsWith("cache-"));
+check("all five descriptor caches report", caches.length === 5, `${caches.length}`);
+const desc = one(torCtx({ "/tb/data/cached-descriptors": { size: 1024, mtime: daysAgo(10) } }), "cache-cached-descriptors");
+check("a cache title names the cache, its size and its age",
+  desc.title === "Descriptor cache cached-descriptors: 1.0 KB (updated 10 day(s) ago)", desc.title);
+check("a cache keeps the cache evidence shape including staleness",
+  JSON.stringify(Object.keys(desc.evidence).sort()) === '["age_days","mtime","size","stale"]', JSON.stringify(desc.evidence));
+check("a cache inside the staleness threshold is not marked stale", desc.evidence.stale === false && desc.evidence.age_days === 10,
+  JSON.stringify(desc.evidence));
+check("a cache inside the threshold says the other thing",
+  desc.detail.startsWith("Updated recently"), desc.detail.slice(0, 60));
+const old = one(torCtx({ "/tb/data/cached-certs": { size: 10, mtime: daysAgo(200) } }), "cache-cached-certs");
+check("a cache past the staleness threshold is marked stale", old.evidence.stale === true, JSON.stringify(old.evidence));
+check("a cache past the threshold says so", old.detail.startsWith("Not updated for a long time"), old.detail.slice(0, 60));
+check("the two detail variants are genuinely different", desc.detail !== old.detail);
+
+const logins = oneFf(ffCtx({ "/p/logins.json": { size: 100, mtime: daysAgo(10) } }), "ff-logins");
+check("a firefox residue title is the one the helper used to build",
+  logins.title === "Saved passwords database present (100 B, written 10 day(s) ago)", logins.title);
+check("a firefox residue keeps the path-age evidence shape",
+  JSON.stringify(Object.keys(logins.evidence).sort()) === '["age_days","mtime","path","size"]', JSON.stringify(logins.evidence));
+check("a firefox residue names the file in its evidence", logins.evidence.path === "logins.json");
+check("a firefox residue dates the file", logins.evidence.age_days === 10, String(logins.evidence.age_days));
+check("ff-logins keeps its warn severity", logins.severity === "warn");
+check("ff-history keeps its info severity", oneFf(ffCtx(ffFiles), "ff-history").severity === "info");
+
+// Presence rules: absent and zero-byte are the same non-event, which is what the old helper did.
+check("an absent residue file reports nothing", one(torCtx({}), "places") === undefined);
+check("a zero-byte residue file reports nothing", one(torCtx({ "/tb/profile/places.sqlite": { size: 0 } }), "places") === undefined);
+check("a zero-byte firefox residue file reports nothing",
+  oneFf(ffCtx({ "/p/logins.json": { size: 0 } }), "ff-logins") === undefined);
+check("a stat that throws-like null is tolerated",
+  evaluateBuiltins("tor", torCtx({}, { statOf: () => null, listDir: () => [] })).length === 1);
+check("a base directory that is missing contributes nothing",
+  evaluateBuiltins("tor", { platform: "win32", root: "x", bases: { data_dir: "" }, io: mkio(allFiles) }).length === 1);
+check("an unknown base name contributes nothing",
+  evaluateBuiltins("tor", { platform: "win32", root: "x", bases: { nowhere: "/x" }, io: mkio(allFiles) }).length === 1);
+
+/* ====================== 6d. the dir-entries probe ====================== */
+
+const pt = (dirs) => evaluateBuiltins("tor", torCtx({}, mkio({}, dirs))).find((f) => f.id === "pt-state");
+check("dir-entries counts the files", pt({ "/tb/data/pt_state": ["a", "b", "c"] }).title === "pt_state retains 3 file(s)",
+  pt({ "/tb/data/pt_state": ["a", "b", "c"] }).title);
+check("dir-entries records the names, capped", (() => {
+  const many = Array.from({ length: 30 }, (_, i) => `f${i}`);
+  return pt({ "/tb/data/pt_state": many }).evidence.files.length === 10;
+})());
+check("an empty directory reports nothing", pt({ "/tb/data/pt_state": [] }) === undefined);
+check("a directory with one file reports one", pt({ "/tb/data/pt_state": ["only"] }).title === "pt_state retains 1 file(s)");
+
+/* ====================== 6e. templates ====================== */
+
+// Every placeholder a built-in entry uses must be one the probe actually supplies, or the
+// finding ships with a literal "{size}" in it. Asserted over the rendered output of every
+// entry, which is the only place it can be seen.
+const rendered = [
+  ...evaluateBuiltins("tor", torCtx(allFiles, mkio(allFiles, { "/tb/data/pt_state": ["a"] }))),
+  ...evaluateBuiltins("firefox", ffCtx(ffFiles)),
+];
+check("every builtin rendered at least one finding to inspect", rendered.length >= 10, `${rendered.length}`);
+check("no title leaves a placeholder unresolved",
+  rendered.every((f) => !/\{[a-z_]+\}/.test(f.title)),
+  rendered.filter((f) => /\{[a-z_]+\}/.test(f.title)).map((f) => `${f.id}: ${f.title}`).join(" | "));
+check("no detail leaves a placeholder unresolved",
+  rendered.every((f) => !/\{[a-z_]+\}/.test(f.detail)),
+  rendered.filter((f) => /\{[a-z_]+\}/.test(f.detail)).map((f) => f.id).join(" | "));
+check("no builtin title or detail is empty",
+  rendered.every((f) => f.title.length > 4 && f.detail.length > 4));
+
+// One entry at a time. This is also where the dispatcher's fail-safe is asserted: the catalog is
+// data, so an entry can name a probe this build does not implement, and that must produce no
+// finding rather than a thrown audit.
+const single = evaluateOneBuiltin(checkById("places"), torCtx({ "/tb/profile/places.sqlite": { size: 10 } }));
+check("one entry can be evaluated on its own", single?.id === "places", JSON.stringify(single));
+check("an entry naming an unknown probe yields nothing rather than throwing",
+  evaluateOneBuiltin({ id: "x", probe: "no-such-probe", severities: ["info"] }, torCtx({})) === null);
+check("an entry with no probe yields nothing", evaluateOneBuiltin({ id: "x" }, torCtx({})) === null);
+check("evaluateOneBuiltin tolerates no entry at all", evaluateOneBuiltin(null, {}) === null);
+check("evaluateOneBuiltin tolerates no context", evaluateOneBuiltin(checkById("disk-encryption")) !== null);
+
+// renderTemplate is exported, so the substitution rule itself is asserted rather than inferred.
+check("an unknown placeholder is left visible rather than blanked",
+  renderTemplate("a {nope} b", { other: 1 }) === "a {nope} b");
+check("a known placeholder is substituted", renderTemplate("x {v} y", { v: 7 }) === "x 7 y");
+check("every occurrence is substituted", renderTemplate("{v}{v}", { v: "z" }) === "zz");
+check("a value of zero still renders", renderTemplate("{v}", { v: 0 }) === "0");
+check("a non-placeholder brace is untouched", renderTemplate("{Not A Key}", {}) === "{Not A Key}");
 
 /* ====================== 7. conformance rules ====================== */
 

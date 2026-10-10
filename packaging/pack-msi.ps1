@@ -68,6 +68,27 @@ if (-not $WixExe -or -not (Test-Path $WixExe)) {
   exit 1
 }
 
+# The installer's dialog set comes from the UI extension. `wix build -ext` resolves an extension
+# that is ALREADY installed and does not fetch a missing one, so naming it in the build command is
+# not enough: the release failed with WIX0144 on a runner where it had never been added, while
+# working here, where an earlier experiment had installed it by hand. The script therefore ensures
+# it is present, which makes a local build and the release build behave the same way.
+#
+# The version is named rather than left to resolve. A bare name installs the newest release, which
+# was 7.0.0 against this WiX 5 toolchain, and the failure that produces complains about the
+# extension's package layout instead of about versions.
+$uiExtension = 'WixToolset.UI.wixext/5.0.2'
+$installedExtensions = (& $WixExe extension list -g 2>$null | Out-String)
+if ($installedExtensions -notmatch 'WixToolset\.UI\.wixext\s+5\.0\.2') {
+  Write-Host "Installing the WiX UI extension ($uiExtension)" -ForegroundColor Magenta
+  & $WixExe extension add -g $uiExtension
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host '  [!!] could not install the WiX UI extension, which the installer UI needs.' -ForegroundColor Red
+    Write-Host "       Install it with:  & '$WixExe' extension add -g $uiExtension" -ForegroundColor Yellow
+    exit 1
+  }
+}
+
 # Stable identities. Changing an UpgradeCode makes the new version install alongside the old
 # one instead of upgrading it, which is a silent, confusing failure -- so these are pinned.
 $products = @{

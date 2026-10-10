@@ -509,6 +509,23 @@ artwork rather than its defaults.
 Also verified without installing, since installing needs elevation this session does not have: the
 built package's `Property` table carries `ARPPRODUCTICON = AragamiIcon`, its `Icon` table carries a
 stream of that name, and its `Dialog` table carries the nineteen dialogs of `WixUI_Minimal`.
+### D54. A build that only worked because of something done by hand
+
+Naming the extension in the build command is not enough. `wix build -ext <name>` resolves an
+extension that is **already installed**; it does not fetch a missing one. Locally the extension was
+present because it had been added by hand while finding out which reference form WiX 5 wanted, so
+the build worked, and the release failed on a runner where nothing had added it: `WIX0144: The
+extension 'WixToolset.UI.wixext/5.0.2' could not be found. Checked paths: WixToolset.UI.wixext/5.0.2`.
+
+`pack-msi.ps1` now ensures the extension is present before it builds, which makes the local build
+and the release build do the same thing. The fix was verified by removing the extension and running
+the script, which is the CI condition reproduced exactly, rather than by trusting that a working
+local build meant a working release.
+
+The shape: **a prerequisite satisfied by hand is a prerequisite that will be missing somewhere
+else**, and the local build cannot tell you which of its inputs came from the sources and which
+came from your session.
+
 
 
 ---

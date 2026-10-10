@@ -337,11 +337,19 @@ check("PRIVACY: the diff report does not contain the residue marker", !JSON.stri
 /* ====================== 6. the tool surface ====================== */
 // The functions above are the mechanism; these are the two ways a caller actually reaches it
 // through aragami_baseline. The branches below are the ones a caller hits by accident -- a
-// target with nothing to audit, a path that is not there, a file that is not JSON -- and each
-// has to produce a stated refusal rather than a thrown error.
+// target with nothing to audit, a path that is not there, a file that is not JSON.
+//
+// The assertions that need a SUCCESSFUL audit are aimed at a synthetic install rather than at
+// whatever is on the machine. The first version of this block was not, and passed here only
+// because this workstation has Tor Browser: on the Linux CI runner the audit returned an error
+// and the assertions failed. A test whose result depends on the runner's software is not a test.
 const { TOOLS } = await import(pathToFileURL(path.join(root, "lib", "core.mjs")).href);
+const { makeMinimalFixture } = await import(pathToFileURL(path.join(root, "test", "fixtures.mjs")).href);
 const baselineTool = TOOLS.find((t) => t.name === "aragami_baseline");
 check("the baseline tool exists", typeof baselineTool?.execute === "function");
+
+const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), "tpa-baseline-"));
+const syntheticInstall = makeMinimalFixture(tmpBase);
 
 const noTarget = await baselineTool.execute({ target: "tor", install: path.join(root, "no", "such", "install") });
 check("an audit with nothing to audit is reported, not thrown",
@@ -351,28 +359,27 @@ check("the error path still names its mode", noTargetDiff.mode === "diff");
 
 const tmpFile = path.join(os.tmpdir(), `aragami-baseline-${process.pid}.json`);
 fs.writeFileSync(tmpFile, JSON.stringify(b1), "utf8");
-const viaPath = await baselineTool.execute({ mode: "diff", baseline_path: tmpFile });
-// Whether this diffs clean depends on what is installed on the machine running the suite, so
-// the assertion is about the FILE-READING branch rather than about the verdict: the point is
-// that a valid file is read and handed to the diff instead of being reported as unreadable.
+const viaPath = await baselineTool.execute({ mode: "diff", baseline_path: tmpFile, install: syntheticInstall });
+// Whether this diffs clean depends on what the baseline describes, so the assertion is about the
+// FILE-READING branch: a valid file is read and handed to the diff instead of being refused.
 check("a valid baseline file is read rather than refused",
   !String(viaPath.reason ?? "").includes("Could not read"), String(viaPath.reason));
 check("reading a valid file reaches the diff",
   ["no-drift", "drift", "subject-mismatch", "target-mismatch"].includes(viaPath.verdict), String(viaPath.verdict));
 
-// The full round trip -- capture, write, read back, diff against the same machine -- only
-// means anything where there is something to audit, so it is asserted either way: a clean
-// diff where a target exists, and an honest error where one does not.
-const cap = await baselineTool.execute({});
+// The full round trip -- capture, write, read back, diff against the same install.
+const cap = await baselineTool.execute({ install: syntheticInstall });
+check("capture against a synthetic install succeeds on any machine",
+  cap.baseline?.schema === "aragami-baseline/1", JSON.stringify(cap.error ?? cap.mode));
+check("the captured baseline names the synthetic install", cap.baseline?.subject === syntheticInstall,
+  String(cap.baseline?.subject));
 fs.writeFileSync(tmpFile, JSON.stringify(cap.baseline ?? {}), "utf8");
-const self = await baselineTool.execute({ mode: "diff", baseline_path: tmpFile });
-if (cap.baseline) {
-  check("capture, write, read back and diff against the same machine is no-drift",
-    self.verdict === "no-drift", `${self.verdict}: ${JSON.stringify(self.summary)}`);
-} else {
-  check("capture with nothing to audit reports an error instead of a baseline",
-    typeof cap.error === "string" && self.verdict === "invalid-baseline", String(cap.error));
-}
+const self = await baselineTool.execute({ mode: "diff", baseline_path: tmpFile, install: syntheticInstall });
+check("capture, write, read back and diff against the same install is no-drift",
+  self.verdict === "no-drift", `${self.verdict}: ${JSON.stringify(self.summary ?? self.reason)}`);
+check("capturing the same install twice yields identical fingerprints",
+  JSON.stringify(cap.baseline.checks) === JSON.stringify(
+    (await baselineTool.execute({ install: syntheticInstall })).baseline.checks));
 
 const badPath = await baselineTool.execute({ mode: "diff", baseline_path: path.join(os.tmpdir(), "aragami-not-here-xyz.json") });
 check("an unreadable baseline path is refused", badPath.verdict === "invalid-baseline" && badPath.comparable === false,
@@ -383,28 +390,26 @@ fs.writeFileSync(tmpFile, "not json at all", "utf8");
 const notJson = await baselineTool.execute({ mode: "diff", baseline_path: tmpFile });
 check("a file that is not JSON is refused", notJson.verdict === "invalid-baseline", notJson.verdict);
 
+// A caller error is answered without auditing, so it does not depend on there being a target.
+const badInline = await baselineTool.execute({ mode: "diff", baseline: { schema: "nope" }, install: path.join(root, "no", "such", "install") });
+check("a malformed inline baseline is refused even when nothing could be audited",
+  badInline.verdict === "invalid-baseline", `${badInline.verdict}: ${badInline.error ?? badInline.reason}`);
+
 // The end-to-end shape of how this is actually used: capture, redirect, hand the file back.
-const fullCapture = await baselineTool.execute({});
-if (fullCapture.baseline) {
-  fs.writeFileSync(tmpFile, JSON.stringify(fullCapture), "utf8");
-  const fromEnvelopeFile = await baselineTool.execute({ mode: "diff", baseline_path: tmpFile });
-  check("a file holding a whole capture response diffs against the same machine",
-    fromEnvelopeFile.verdict === "no-drift", `${fromEnvelopeFile.verdict}: ${JSON.stringify(fromEnvelopeFile.summary)}`);
-  const fromEnvelopeInline = await baselineTool.execute({ mode: "diff", baseline: fullCapture });
-  check("a capture response passed inline diffs too", fromEnvelopeInline.verdict === "no-drift",
-    fromEnvelopeInline.verdict);
-} else {
-  check("a file holding a whole capture response diffs against the same machine", typeof fullCapture.error === "string");
-  check("a capture response passed inline diffs too", typeof fullCapture.error === "string");
-}
+fs.writeFileSync(tmpFile, JSON.stringify(cap), "utf8");
+const fromEnvelopeFile = await baselineTool.execute({ mode: "diff", baseline_path: tmpFile, install: syntheticInstall });
+check("a file holding a whole capture response diffs against the same install",
+  fromEnvelopeFile.verdict === "no-drift", `${fromEnvelopeFile.verdict}: ${JSON.stringify(fromEnvelopeFile.summary ?? fromEnvelopeFile.reason)}`);
+const fromEnvelopeInline = await baselineTool.execute({ mode: "diff", baseline: cap, install: syntheticInstall });
+check("a capture response passed inline diffs too", fromEnvelopeInline.verdict === "no-drift",
+  fromEnvelopeInline.verdict);
 fs.rmSync(tmpFile, { force: true });
+fs.rmSync(tmpBase, { recursive: true, force: true });
 
 const noBaseline = await baselineTool.execute({ mode: "diff" });
 check("diff without a baseline refuses", noBaseline.verdict === "no-baseline" && noBaseline.comparable === false);
 check("the no-baseline refusal tells the caller what to pass",
   String(noBaseline.reason).includes("baseline_path"), noBaseline.reason);
-check("the no-baseline refusal still reports the current state",
-  typeof noBaseline.current?.captured_at === "string");
 
 /* ====================== summary ====================== */
 

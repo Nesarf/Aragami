@@ -6,12 +6,20 @@
 // CLI gets.
 
 import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { makeMinimalFixture } from "./fixtures.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
+
+// A synthetic install for the calls that need something to audit, so this suite does not depend
+// on what the runner has installed.
+const fixtureBase = fs.mkdtempSync(path.join(os.tmpdir(), "tpa-mcp-"));
+process.on("exit", () => { try { fs.rmSync(fixtureBase, { recursive: true, force: true }); } catch {} });
 
 // The expected tool set is read from the core rather than written down here. A hardcoded
 // count goes stale the moment a tool is added -- and it fails in the least useful way, as a
@@ -135,37 +143,43 @@ const missRes = await client.callTool({ name: "aragami_checks", arguments: { id:
 check("checks finds a real id", missRes.structuredContent?.found === true);
 
 console.log("\n== tools/call: aragami_baseline (capture, then diff against itself) ==");
-const capRes = await client.callTool({ name: "aragami_baseline", arguments: {} });
-const cap = capRes.structuredContent;
+// The audit is aimed at a SYNTHETIC install rather than at whatever happens to be on the machine.
+// The first version of this block did not, and passed here only because this workstation has Tor
+// Browser installed -- on the Linux CI runner, which has neither Tor Browser nor Firefox, the
+// audit returned an error and six assertions failed. A smoke test whose result depends on the
+// runner's software is not a smoke test. test/fixtures.mjs is the shared source of fixtures, so
+// this uses it rather than writing a second, smaller copy that would drift.
+fs.mkdirSync(fixtureBase, { recursive: true });
+const syntheticInstall = makeMinimalFixture(fixtureBase);
+const capture = await client.callTool({ name: "aragami_baseline", arguments: { install: syntheticInstall } });
+const cap = capture.structuredContent;
 check("baseline captures", cap?.mode === "capture" && cap?.baseline?.schema === "aragami-baseline/1",
-  JSON.stringify(cap?.mode ?? cap?.error));
-if (cap?.baseline) {
-  check("a freshly captured baseline has no drift against the live state",
-    true); // established by the diff below
-  const difRes = await client.callTool({
-    name: "aragami_baseline",
-    arguments: { mode: "diff", baseline: cap.baseline },
-  });
-  const df = difRes.structuredContent;
-  check("diffing a capture against the same machine is no-drift", df?.verdict === "no-drift",
-    `${df?.verdict}: ${JSON.stringify(df?.summary)}`);
-  check("diff is comparable", df?.comparable === true);
-  check("diff carries boundary_notice", (df?.boundary_notice ?? []).length >= 4);
-  const badRes = await client.callTool({ name: "aragami_baseline", arguments: { mode: "diff", baseline: { schema: "nope" } } });
-  check("diff refuses an unusable baseline", badRes.structuredContent?.verdict === "invalid-baseline");
-  const noneRes = await client.callTool({ name: "aragami_baseline", arguments: { mode: "diff" } });
-  check("diff without a baseline refuses rather than inventing one", noneRes.structuredContent?.verdict === "no-baseline");
-} else {
-  check("a freshly captured baseline has no drift against the live state", false, "no baseline was captured");
-  check("diffing a capture against the same machine is no-drift", false, "no baseline was captured");
-  check("diff is comparable", false, "no baseline was captured");
-  check("diff carries boundary_notice", false, "no baseline was captured");
-  check("diff refuses an unusable baseline", false, "no baseline was captured");
-  check("diff without a baseline refuses rather than inventing one", false, "no baseline was captured");
-}
+  JSON.stringify(cap?.error ?? cap?.mode));
+check("the captured baseline records the synthetic install",
+  cap?.baseline?.subject === syntheticInstall, String(cap?.baseline?.subject));
+check("a baseline stores fingerprints and no evidence", (() => {
+  const leaves = [];
+  (function walk(v) { if (typeof v === "string") leaves.push(v);
+    else if (v && typeof v === "object") for (const k of Object.keys(v)) walk(v[k]); })(cap?.baseline?.checks ?? {});
+  return leaves.length > 0 && !leaves.some((s) => s.includes(fixtureBase));
+})(), "a path reached the baseline");
+const difRes = await client.callTool({
+  name: "aragami_baseline",
+  arguments: { mode: "diff", baseline: cap.baseline, install: syntheticInstall },
+});
+const df = difRes.structuredContent;
+check("diffing a capture against the same install is no-drift", df?.verdict === "no-drift",
+  `${df?.verdict}: ${JSON.stringify(df?.summary ?? df?.reason)}`);
+check("diff is comparable", df?.comparable === true);
+check("diff carries boundary_notice", (df?.boundary_notice ?? []).length >= 4);
+const badRes = await client.callTool({ name: "aragami_baseline", arguments: { mode: "diff", baseline: { schema: "nope" } } });
+check("diff refuses an unusable baseline", badRes.structuredContent?.verdict === "invalid-baseline");
+const noneRes = await client.callTool({ name: "aragami_baseline", arguments: { mode: "diff" } });
+check("diff without a baseline refuses rather than inventing one", noneRes.structuredContent?.verdict === "no-baseline");
+fs.rmSync(fixtureBase, { recursive: true, force: true });
 
 console.log("\n== every response names its schema ==");
-for (const [label, res] of [["env", envRes], ["audit", auditRes], ["version", verRes], ["assess", layRes], ["checks", chkRes], ["baseline", capRes]]) {
+for (const [label, res] of [["env", envRes], ["audit", auditRes], ["version", verRes], ["assess", layRes], ["checks", chkRes], ["baseline", capture]]) {
   check(`${label} response carries a versioned schema`, /^aragami-[a-z-]+\/\d+$/.test(res.structuredContent?.schema ?? ""),
     String(res.structuredContent?.schema));
 }

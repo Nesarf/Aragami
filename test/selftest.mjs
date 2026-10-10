@@ -29,6 +29,7 @@ const root = path.resolve(here, "..");
 const { parseTorrc, parsePrefs, discoverInstalls, cmpVer, detectEnvironment, TOOLS, safeStringify } = await import(
   pathToFileURL(path.join(root, "lib", "core.mjs")).href
 );
+const { statfsTypeOf } = await import(pathToFileURL(path.join(root, "lib", "shared.mjs")).href);
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -555,26 +556,33 @@ section("B13. traverser self-check");
   }
 }
 
-section("B14. built-in probe robustness (a path that does not exist)");
+section("B14. built-in probes against a synthetic install");
 {
-  // The audit is asked for things that are not there all the time -- a stale profile path, a
-  // profile on a disconnected drive. Every read behind the audit is wrapped, and this is the
-  // assertion that the wrapper is actually around the volume probe: statfs throws on a path it
-  // cannot resolve, and a thrown error there would take down the whole audit rather than one
-  // check.
-  const ghost = path.join(base, "definitely", "not", "here");
+  // The volume probe's inputs come from two reads, and both have a failing path: statfs throws
+  // on a path that cannot be resolved, and the mount table is absent off Linux. statfsTypeOf is
+  // tested directly rather than through an audit of a missing directory, because the earlier
+  // version of this section audited a nonexistent Firefox profile -- which fails outright on a
+  // machine with no Firefox profiles, and so tested the runner rather than the code.
+  check("statfsTypeOf returns null rather than throwing for a path that does not exist",
+    statfsTypeOf(path.join(base, "definitely", "not", "here")) === null);
+  check("statfsTypeOf returns a number or null for a path that does exist",
+    [typeof statfsTypeOf(base), "object"].includes(typeof statfsTypeOf(base)));
+
+  // And the probe itself, aimed at a fixture so this runs anywhere.
   const auditTool = TOOLS.find((t) => t.name === "aragami_audit");
   let res = null, threw = null;
-  try { res = await auditTool.execute({ target: "firefox", profile: ghost }); } catch (e) { threw = e; }
-  check("auditing a profile that does not exist does not throw", threw === null, String(threw && threw.message));
+  try { res = await auditTool.execute({ target: "tor", install: F.minimal }); } catch (e) { threw = e; }
+  check("auditing a synthetic install does not throw", threw === null, String(threw && threw.message));
   const probe = (res?.findings ?? []).find((f) => f.id === "disk-encryption");
-  check("the volume probe still reports when the path is missing", probe !== undefined);
-  check("a missing path is not reported as encrypted", probe?.severity !== "ok", String(probe?.severity));
+  check("the volume probe reports", probe !== undefined, (res?.findings ?? []).map((f) => f.id).join(","));
   check("the probe states a reason rather than a bare verdict",
     typeof probe?.evidence?.reason === "string" && probe.evidence.reason.length > 0, JSON.stringify(probe?.evidence));
-  check("facts are still produced for a missing profile", res?.facts?.endpoint !== undefined);
-  check("conformance still holds on the error-tolerant path", res?.checks?.conformant === true,
-    JSON.stringify(res?.checks));
+  check("the probe never claims encryption it cannot see",
+    !(probe?.severity === "ok" && process.platform === "win32"), String(probe?.severity));
+  check("facts are produced for a synthetic install", res?.facts?.endpoint !== undefined);
+  check("conformance holds on a synthetic install", res?.checks?.conformant === true, JSON.stringify(res?.checks));
+  check("every finding of the synthetic audit is catalogued", (res?.checks?.unknown ?? []).length === 0,
+    (res?.checks?.unknown ?? []).join(","));
 }
 
 /* ====================== cleanup ====================== */

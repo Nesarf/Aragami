@@ -417,3 +417,39 @@ comment saying why per-branch guarding was the mistake.
 
 The general shape: optional chaining applied to the first use of a value and not the rest is a
 pattern that reads as defensive and is not, because it moves the failure rather than preventing it.
+
+### D43. A security tool was carrying four advisories, and only one of them ships
+
+`gh` reported the push with a banner: *"GitHub found 1 vulnerability on Nesarf/Aragami's default
+branch (1 moderate)."* `npm audit` reported **four**, including one critical the banner did not
+mention:
+
+| package | version | severity | advisory |
+|---|---|---|---|
+| `proxy-addr` | 2.0.7 | **critical** | IP spoofing via IPv4-mapped IPv6 trust subnet (GHSA-jqcg-44mw-7w3h) |
+| `ip-address` | 10.7.0 | moderate | `isInSubnet()` / `isHostInSubnet()` admit an address outside the range (GHSA-j6r3-76f7-8jcv) |
+| `ip-address` | 10.7.0 | moderate | `Address6` parse diagnostic is unbounded in the input length (GHSA-h3mg-xc3c-68pw) |
+| `fast-uri` | 3.1.7 | moderate | host case normalisation via percent-encoded octets (GHSA-hrr3-gc8f-f4qj) |
+
+All four arrive through `@modelcontextprotocol/sdk`, and the interesting question is not the count
+but **which of them reach a user**. That is a measurement, not a guess -- grep the built bundle:
+
+    ip-address          0 occurrences in dist/mcp.cjs
+    proxy-addr          0 occurrences in dist/mcp.cjs
+    express-rate-limit  0 occurrences in dist/mcp.cjs
+    express             2 occurrences (a string, not the module)
+    fast-uri            6 occurrences   <-- this one ships
+
+The first three come from the SDK's HTTP transport, and this tool only ever uses the stdio
+transport, so esbuild never reaches them. `fast-uri` arrives through the schema validation that the
+stdio path *does* use, so it is in the artifact users download. An advisory count is therefore not
+by itself a statement about exposure, and the bundle was inspected rather than assumed.
+
+`npm audit fix` resolved all four inside the existing semver ranges (`ip-address` 10.7.0 -> 10.7.3,
+`proxy-addr` 2.0.7 -> 2.0.8, `fast-uri` 3.1.7 -> 3.1.8) with no change to `package.json`; the
+runtime dependency count is still one.
+
+The shape worth keeping: **a public advisory banner on a security tool costs more than the
+advisory**, because it is the first thing a visitor sees, and the cheap fix is `npm audit fix`
+rather than an argument about reachability. Fix first, then measure which part was reachable and
+write that down.

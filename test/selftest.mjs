@@ -677,6 +677,28 @@ section("B15. repository hygiene: line endings");
     if (fs.readFileSync(full).includes(CRLF)) offenders.push(path.relative(root, full));
   }
   check("no tracked text file carries CRLF line endings", offenders.length === 0, offenders.join(", "));
+
+  // Pure ASCII, which this repository's conventions require and nothing enforced. Found the hard
+  // way: a CLI layout written with a middle dot as a bullet passed every suite and was caught only
+  // by an ad-hoc check in a shell. Same class as the CRLF guard above -- a stated convention with
+  // no assertion behind it is a convention that will be broken by whoever next edits in a hurry.
+  // Build output is skipped, not because the convention is relaxed for it but because it is not
+  // tracked and is not ours: the bundles carry whatever their dependencies carry. git ls-files
+  // would be the exact filter; a directory list is used here to keep this suite free of a
+  // subprocess, and the two agree because .gitignore names the same directories.
+  const BUILD_OUT = ["dist", "dist-tor", "dist-ff", "artifacts", ".git", "node_modules"];
+  const wide = [];
+  for (const full of walk(root)) {
+    const rel = path.relative(root, full);
+    if (rel.split(path.sep).some((part) => BUILD_OUT.includes(part))) continue;
+    const ext = path.extname(full).toLowerCase();
+    if (binaryExt.includes(ext)) continue;
+    const buf = fs.readFileSync(full);
+    for (let i = 0; i < buf.length; i++) {
+      if (buf[i] > 127) { wide.push(`${path.relative(root, full)} @${i}`); break; }
+    }
+  }
+  check("every tracked text file is pure ASCII", wide.length === 0, wide.slice(0, 6).join(", "));
   check("the batch launchers keep the CRLF .gitattributes asks for",
     walk(path.join(root, "bin")).filter((f) => f.endsWith(".cmd"))
       .every((f) => fs.readFileSync(f).includes(Buffer.from("\r\n"))));

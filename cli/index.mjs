@@ -185,7 +185,7 @@ function human(result, toolName) {
         const [col, mark] = SEV_STYLE[f.severity] ?? ["gray", "? "];
         L.push(`  ${c(col, mark)}${c("bold", f.title)}  ${c("gray", `[${f.layer}]`)}`);
         const ev = f.evidence ?? {};
-        if (ev.entries?.length) for (const e of ev.entries) L.push(c("gray", `      · ${e.path}`));
+        if (ev.entries?.length) for (const e of ev.entries) L.push(c("gray", `      - ${e.path}`));
         if (ev.truncated) L.push(c("yellow", "      ! the walk hit its cap; this is a partial list"));
       }
       L.push(c("gray", `  ${result.checks?.checked ?? 0} of ${result.checks?.declared ?? 0} declared checks produced a finding`));

@@ -108,6 +108,36 @@ foreach ($v in $variants) {
   $dest = Join-Path $OutDir $exe
   Move-Item (Join-Path $work $exe) $dest -Force
 
+  # CLEAR THE PE'S CERTIFICATE-TABLE DIRECTORY ENTRY, because postject leaves it stale.
+  #
+  # postject inserts a section and appends the blob, but the optional header's data directory entry 4
+  # (IMAGE_DIRECTORY_ENTRY_SECURITY) keeps the offset it had in the base node.exe. In the produced file
+  # that offset lands in the middle of the section data -- measured on every executable built for this
+  # project and its sibling: 72435712 + 10448 in the published artifacts, 93365760 + 15688 against the
+  # local node, with the sections ending at the file length in both -- and signtool then refuses the
+  # WHOLE file with 0x800700C1 ERROR_BAD_EXE_FORMAT ("bad exe format"), while an ordinary PE of the
+  # same size signs beside it without complaint.
+  #
+  # The entry is meaningless in an unsigned file, and the executable runs either way; both were
+  # measured, before and after signing. Clearing it here means every artifact this repository builds
+  # can be signed, instead of each release rediscovering the same rejection.
+  $bytes = [System.IO.File]::ReadAllBytes($dest)
+  $peOff = [BitConverter]::ToInt32($bytes, 0x3C)
+  $optOff = $peOff + 4 + 20
+  $magic = [BitConverter]::ToUInt16($bytes, $optOff)
+  $dirsOff = $optOff + $(if ($magic -eq 0x20b) { 112 } else { 96 })
+  $entryOff = $dirsOff + (4 * 8)
+  $staleVa = [BitConverter]::ToInt32($bytes, $entryOff)
+  $staleSize = [BitConverter]::ToInt32($bytes, $entryOff + 4)
+  if ($staleVa -ne 0 -or $staleSize -ne 0) {
+    for ($i = 0; $i -lt 4; $i++) {
+      $bytes[$entryOff + $i] = 0
+      $bytes[$entryOff + 4 + $i] = 0
+    }
+    [System.IO.File]::WriteAllBytes($dest, $bytes)
+    Write-Host ("    cleared a stale certificate-table entry (offset {0} size {1}) so the exe can be signed" -f $staleVa, $staleSize)
+  }
+
   # Prove it runs rather than trusting the injection message.
   $probe = & $dest aragami_version --online false 2>&1 | Out-String
   $ok = $probe -match '"verdict"'

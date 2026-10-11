@@ -48,7 +48,7 @@ The interesting category for a tool like this is not a crash. It is being **wron
 
 Open a private advisory:
 
-    https://github.com/Nesarf/Aragami/security/advisories/new
+    https://github.com/Nesarf/Aragami-SilentCrystal/security/advisories/new
 
 Private vulnerability reporting is enabled on this repository, so a report stays between the
 reporter and the maintainer until an advisory is published. Please do not open a public issue

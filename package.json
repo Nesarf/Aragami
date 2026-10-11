@@ -45,11 +45,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Nesarf/Aragami.git"
+    "url": "git+https://github.com/Nesarf/Aragami-SilentCrystal.git"
   },
-  "homepage": "https://github.com/Nesarf/Aragami#readme",
+  "homepage": "https://github.com/Nesarf/Aragami-SilentCrystal#readme",
   "bugs": {
-    "url": "https://github.com/Nesarf/Aragami/issues"
+    "url": "https://github.com/Nesarf/Aragami-SilentCrystal/issues"
   },
   "keywords": [
     "mcp",

@@ -18,7 +18,7 @@
 
 .EXAMPLE
   .\generate.ps1
-  .\generate.ps1 -ReleaseBase 'https://github.com/Nesarf/Aragami/releases/download/v0.1.0'
+  .\generate.ps1 -ReleaseBase 'https://github.com/Nesarf/Aragami-SilentCrystal/releases/download/v0.1.0'
 #>
 [CmdletBinding()]
 param(
@@ -27,7 +27,7 @@ param(
   [string]$ReleaseBase,
   [string]$Publisher = 'Nesarf',
   [string]$License = 'MIT',
-  [string]$PackageUrl = 'https://github.com/Nesarf/Aragami'
+  [string]$PackageUrl = 'https://github.com/Nesarf/Aragami-SilentCrystal'
 )
 
 $ErrorActionPreference = 'Stop'

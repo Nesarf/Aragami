@@ -1,6 +1,6 @@
-# Aragami
+# Aragami SilentCrystal
 
-[![release](https://github.com/Nesarf/Aragami/actions/workflows/release.yml/badge.svg)](https://github.com/Nesarf/Aragami/actions/workflows/release.yml)
+[![release](https://github.com/Nesarf/Aragami-SilentCrystal/actions/workflows/release.yml/badge.svg)](https://github.com/Nesarf/Aragami-SilentCrystal/actions/workflows/release.yml)
 
 **A portable static posture auditor for Tor Browser and Firefox.**
 

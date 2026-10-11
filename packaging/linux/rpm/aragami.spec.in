@@ -9,7 +9,7 @@ Version:        @VERSION@
 Release:        1%{?dist}
 Summary:        Static posture audit for Tor Browser and Firefox
 License:        MIT
-URL:            https://github.com/Nesarf/Aragami
+URL:            https://github.com/Nesarf/Aragami-SilentCrystal
 BuildArch:      noarch
 Requires:       nodejs >= 18
 @CONFLICTS@

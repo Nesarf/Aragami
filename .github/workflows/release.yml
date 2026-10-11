@@ -433,7 +433,7 @@ jobs:
           # started it.
           if OUT=$(gh release create "$GITHUB_REF_NAME" \
                      --repo "$GITHUB_REPOSITORY" \
-                     --title "Aragami $GITHUB_REF_NAME" \
+                     --title "Aragami SilentCrystal $GITHUB_REF_NAME" \
                      --notes-file notes.md \
                      "${assets[@]}" 2>&1); then
             printf '%s\n' "$OUT"

@@ -5,7 +5,7 @@ Priority: optional
 Architecture: all
 Depends: nodejs (>= 18)
 Maintainer: Nesarf <Nesarf@users.noreply.github.com>
-Homepage: https://github.com/Nesarf/Aragami
+Homepage: https://github.com/Nesarf/Aragami-SilentCrystal
 Description: static posture audit for Tor Browser and Firefox
  Aragami reads a browser install or profile and reports configuration posture and
  static residue across five layers: build, transport, content/authorization,

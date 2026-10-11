@@ -51,10 +51,10 @@ description: |
 grade: stable
 confinement: classic
 license: MIT
-contact: https://github.com/Nesarf/Aragami/issues
-issues: https://github.com/Nesarf/Aragami/issues
-website: https://github.com/Nesarf/Aragami
-source-code: https://github.com/Nesarf/Aragami
+contact: https://github.com/Nesarf/Aragami-SilentCrystal/issues
+issues: https://github.com/Nesarf/Aragami-SilentCrystal/issues
+website: https://github.com/Nesarf/Aragami-SilentCrystal
+source-code: https://github.com/Nesarf/Aragami-SilentCrystal
 
 parts:
   # The interpreter the wrappers exec. A snap must not reach outside its own confinement for a

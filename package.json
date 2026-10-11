@@ -1,6 +1,6 @@
 {
   "name": "aragami",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Portable static posture audit for Tor Browser and Firefox across five layers: build, transport, content/authorization, metadata, endpoint. Read-only, and the layer assessment is explicit about what no tool can solve.",
   "type": "module",
   "main": "mcp/index.mjs",

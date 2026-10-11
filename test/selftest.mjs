@@ -30,6 +30,7 @@ const { parseTorrc, parsePrefs, discoverInstalls, cmpVer, detectEnvironment, TOO
   pathToFileURL(path.join(root, "lib", "core.mjs")).href
 );
 const { statfsTypeOf } = await import(pathToFileURL(path.join(root, "lib", "shared.mjs")).href);
+const { VERSION } = await import(pathToFileURL(path.join(root, "lib", "core.mjs")).href);
 
 let pass = 0, fail = 0;
 const failures = [];
@@ -699,6 +700,17 @@ section("B15. repository hygiene: line endings");
     }
   }
   check("every tracked text file is pure ASCII", wide.length === 0, wide.slice(0, 6).join(", "));
+  // The version lives in TWO places: the packaging scripts read package.json, and the tools report
+  // lib/core.mjs's VERSION. Bumping one and not the other produces artifacts named 0.2.0 whose own
+  // tool_version says 0.1.0 -- the same shape as D52, where a guard carried its own copy of the
+  // rule it was guarding. The duplication is kept rather than removed because importing JSON in ESM
+  // needs an import attribute whose spelling differs across the Node versions this supports
+  // (assert on older, with on newer), and a release path is the wrong place to discover that. It is
+  // simply not left unguarded.
+  const pkgVersion = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
+  check("the version the tools report is the version the packaging scripts read",
+    pkgVersion === VERSION, `package.json ${pkgVersion} vs lib/core.mjs ${VERSION}`);
+
   check("the batch launchers keep the CRLF .gitattributes asks for",
     walk(path.join(root, "bin")).filter((f) => f.endsWith(".cmd"))
       .every((f) => fs.readFileSync(f).includes(Buffer.from("\r\n"))));

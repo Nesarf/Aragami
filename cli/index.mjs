@@ -165,6 +165,31 @@ function human(result, toolName) {
         L.push(c("gray", `      does not cover  ${cc.does_not_cover}`));
       }
     }
+  } else if (toolName === "aragami_handoff") {
+    L.push(hr("Hand-off scan"));
+    if (result.error) {
+      L.push(c("red", `  x ${result.error}`));
+    } else {
+      L.push(`  Directory  ${c("bold", result.directory ?? "?")}`);
+      L.push(`  Tor        ${result.tor_install ?? c("gray", "none found")}` +
+        c("gray", "   (onion authorization state, when one is present)"));
+      const t = result.tally ?? {};
+      L.push("  " + ["critical", "warn", "info", "ok"].map((k) => c(SEV_STYLE[k][0], `${k} ${t[k] ?? 0}`)).join("   "));
+      if (!(result.findings ?? []).length) {
+        // The absence of a finding is not a clean bill of health, and this is exactly the place a
+        // reader would take it for one.
+        L.push(c("green", "  Nothing matched."));
+        L.push(c("gray", "      That is not a clean bill of health: this reads names and sizes, never contents."));
+      }
+      for (const f of result.findings ?? []) {
+        const [col, mark] = SEV_STYLE[f.severity] ?? ["gray", "? "];
+        L.push(`  ${c(col, mark)}${c("bold", f.title)}  ${c("gray", `[${f.layer}]`)}`);
+        const ev = f.evidence ?? {};
+        if (ev.entries?.length) for (const e of ev.entries) L.push(c("gray", `      · ${e.path}`));
+        if (ev.truncated) L.push(c("yellow", "      ! the walk hit its cap; this is a partial list"));
+      }
+      L.push(c("gray", `  ${result.checks?.checked ?? 0} of ${result.checks?.declared ?? 0} declared checks produced a finding`));
+    }
   } else if (toolName === "aragami_baseline") {
     if (result.mode === "capture") {
       if (result.error) {
@@ -283,6 +308,7 @@ Examples:
   node cli/index.mjs aragami_checks --id state-file --human
   node cli/index.mjs aragami_baseline > baseline.json
   node cli/index.mjs aragami_baseline --mode diff --baseline_path baseline.json --human
+  node cli/index.mjs aragami_handoff --path ./to-send --human
   node cli/index.mjs aragami_layer_assess --metadata_sensitive true --realtime true --human
 
 Notes: this tool reads files only, never starts Tor, and does not use the network

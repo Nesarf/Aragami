@@ -682,6 +682,76 @@ section("B15. repository hygiene: line endings");
       .every((f) => fs.readFileSync(f).includes(Buffer.from("\r\n"))));
 }
 
+section("D. aragami_handoff, against a real directory");
+
+// On a real filesystem rather than through the fake io, because the point of this tool is that it
+// walks a tree, and the fake io would only prove that the walk agrees with the fake.
+{
+  const box = path.join(base, "handoff");
+  fs.mkdirSync(path.join(box, "sub"), { recursive: true });
+  fs.mkdirSync(path.join(box, ".git"), { recursive: true });
+  fs.mkdirSync(path.join(box, "node_modules", "pkg"), { recursive: true });
+  fs.writeFileSync(path.join(box, "id_rsa"), "PRIVATE KEY\n");
+  fs.writeFileSync(path.join(box, ".env"), "TOKEN=x\n");
+  fs.writeFileSync(path.join(box, "notes.txt"), "nothing to see\n");
+  fs.writeFileSync(path.join(box, "Thumbs.db"), "x");
+  fs.writeFileSync(path.join(box, "sub", "key.pem"), "-----BEGIN\n");
+  fs.writeFileSync(path.join(box, "node_modules", "pkg", "index.js"), "1\n");
+  fs.writeFileSync(path.join(box, ".git", "config"), "[core]\n");
+
+  const h = await T("aragami_handoff").execute({ path: box });
+  const byId = (id) => (h.findings ?? []).find((f) => f.id === id);
+
+  check("the hand-off tool answers with its own schema", h.schema === "aragami-handoff/1", h.schema);
+  check("it carries the standard boundary notice", Array.isArray(h.boundary_notice) && h.boundary_notice.length >= 4);
+  check("its findings conform to the declared catalog", h.checks?.conformant === true, JSON.stringify(h.checks?.unknown));
+  check("it reports which directory it read", h.directory === box);
+
+  const secrets = byId("handoff-secret-material");
+  const paths = (secrets?.evidence?.entries ?? []).map((e) => e.path);
+  check("it finds key-shaped names", !!secrets && paths.length === 3, JSON.stringify(paths));
+  check("it recurses into subdirectories", paths.includes("sub/key.pem"), JSON.stringify(paths));
+  check("it does NOT report a file that merely exists", !paths.includes("notes.txt"), JSON.stringify(paths));
+
+  check("it reports build residue, and a DIRECTORY counts",
+    !!byId("handoff-build-residue") && byId("handoff-build-residue").evidence.entries.some((e) => e.path === "node_modules/"),
+    JSON.stringify(byId("handoff-build-residue")?.evidence?.entries));
+  check("it reports version-control entry as a directory", !!byId("handoff-vcs-internals"),
+    JSON.stringify(byId("handoff-vcs-internals")?.evidence?.entries));
+
+  // The evidence list is capped, and the count it reports is NOT -- a reader acts on the number.
+  check("the matched count is the total, independent of what is listed",
+    secrets?.evidence?.matched === secrets?.title.match(/\d+/)?.[0] * 1,
+    JSON.stringify({ matched: secrets?.evidence?.matched, title: secrets?.title }));
+
+  // Filters, since the CLI exposes them.
+  const warnsOnly = await T("aragami_handoff").execute({ path: box, min_severity: "warn" });
+  check("min_severity filters the report and is echoed back",
+    warnsOnly.findings.every((f) => f.severity === "warn") && warnsOnly.applied_filter.min_severity === "warn",
+    JSON.stringify(warnsOnly.findings.map((f) => f.severity)));
+  check("filtering does not change what was OBSERVED, only what is reported",
+    warnsOnly.checks.checked >= warnsOnly.findings.length, JSON.stringify(warnsOnly.checks));
+
+  // Error paths, which are the ones a caller hits first.
+  const missing = await T("aragami_handoff").execute({ path: path.join(base, "definitely-not-here") });
+  check("a missing directory is an error, not an empty clean report",
+    typeof missing.error === "string" && missing.findings === undefined, JSON.stringify(missing.error));
+  const aFile = path.join(box, "id_rsa");
+  const notDir = await T("aragami_handoff").execute({ path: aFile });
+  check("a file where a directory was expected is an error too",
+    typeof notDir.error === "string", JSON.stringify(notDir.error));
+  const noPath = await T("aragami_handoff").execute({});
+  check("no path at all is an error", typeof noPath.error === "string", JSON.stringify(noPath.error));
+
+  // The onion-authorization half is base-gated, so with no Tor install it must be silent rather
+  // than reporting an absence it cannot establish.
+  const withoutTor = await T("aragami_handoff").execute({ path: box, tor_install: path.join(base, "no-tor-here") });
+  check("with no Tor install the onion checks stay silent",
+    !(withoutTor.findings ?? []).some((f) => f.id.startsWith("onion-auth")),
+    JSON.stringify((withoutTor.findings ?? []).map((f) => f.id)));
+  check("and the response says no install was used", withoutTor.tor_install === null, String(withoutTor.tor_install));
+}
+
 /* ====================== cleanup ====================== */
 try { fs.rmSync(base, { recursive: true, force: true }); console.log("\n  \u001b[90mTemporary fixtures cleaned up\u001b[0m"); } catch {}
 

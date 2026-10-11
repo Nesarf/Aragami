@@ -30,6 +30,9 @@ than at your machine:
 
 - **What can this tool even see?** `aragami_checks` prints the declared check surface, one
   entry per check, each stating what it reads and what it explicitly does not cover.
+- **What would travel with this directory?** `aragami_handoff` scans a folder you are about to
+  give someone else and reports the key-shaped names, residue and build artefacts that would go
+  with it -- by name only, never by reading contents, and it says so where it reports.
 - **Did anything move?** `aragami_baseline` captures the audit as a set of per-check
   fingerprints and diffs a later run against it. Posture at rest and posture *drift* are
   different questions, and only the second one catches a guard set quietly growing.
@@ -54,6 +57,7 @@ A clean audit is NOT proof of safety. Treating it as one is a misuse.
 The rest of this section is this README explaining that notice, not repeating it.
 
 - **Traffic correlation and timing analysis**: an adversary does not need to read the content, only to line up the entry and exit timings. **Content encryption helps the metadata layer by roughly zero.**
+- **Live protocol queries and reachability tests**: refused rather than merely absent, and the two are refused for different reasons. Querying Tor's ControlPort is refused because an audit that depends on whether a service happens to be running stops being deterministic, and determinism is what the baseline and drift feature rests on. Testing whether a configured bridge is reachable is refused because **the check would be the harm**: dialing a bridge from your address, at a moment of your choosing, manufactures exactly the metadata an adversary needs to find and fingerprint that bridge's use. See discipline 18.
 - **Endpoint compromise**: malware, keyloggers, a seized device. Cryptography cannot reach this layer.
 - **What happens after decryption**: the recipient read it, kept a copy, said something, met someone -- the most common point of failure in public cases.
 - **People**: no technical solution exists. This is the one layer `aragami_layer_assess` will not recommend anything for, and the one `aragami_audit` never reports a finding under.
@@ -330,6 +334,37 @@ Key behaviors:
 - Accepts a capture response as well as a bare record, so redirecting a capture straight to a file works
 - Stateless: nothing is written anywhere. You keep the baseline and hand it back
 
+### `aragami_handoff`
+
+What would travel with a directory you are about to give someone else. Point it at the directory and
+it reports what it finds **by name**, and nothing else.
+
+| Parameter | Description |
+|---|---|
+| `path` | The directory about to be handed over |
+| `tor_install` | Optional: a Tor Browser install root to use for the onion-authorization part, instead of the one that would be discovered |
+| `layer`, `min_severity` | Filters, as in `aragami_audit` |
+
+It looks for five things, all of them catalog data rather than code -- see `aragami_checks` for the
+per-check limits, which are stated by each check rather than summarized here:
+
+- **Key-shaped names**: `id_rsa`, `*.pem`, `*.kdbx`, `.env`, `credentials.json`, `known_hosts` and similar, anywhere in the tree
+- **Editor and OS residue**: `Thumbs.db`, `.DS_Store`, `desktop.ini`, swap and backup files
+- **Version-control entry**: `.git`, `.hg`, `.svn` -- a repository carries every revision, including the ones deleted from the working tree
+- **Build and dependency artefacts**: `node_modules`, `__pycache__`, `target`, `dist`
+- **OnionShare presence**: whether a share can be started from this machine at all
+
+When a Tor Browser install is present, its **onion client authorization state** is included, because
+that is the other half of preparing a delivery: it answers who can reach the service the package is
+being sent over. Those checks are declared for this target as well and are gated on the bases a Tor
+install supplies, so with none present they stay silent rather than reporting an absence they cannot
+establish -- and the response names whichever install was used.
+
+**The limit that matters most here**: it reads names and sizes, **never file contents**. A key
+pasted into `notes.txt`, or a password inside a spreadsheet, is invisible to it. So a scan that
+finds nothing is **not** a clean bill of health; it means nothing matched a name. The CLI says so at
+the point where a reader would otherwise take silence for approval.
+
 ---
 
 ## 5. The four-layer model
@@ -387,14 +422,14 @@ npm run test:emblem   # the seal only; needs no source work
 
 | Traverser | What it asserts | Scale |
 |---|---|---|
-| `test/selftest.mjs` | **Semantic correctness** (Tor target): should this branch report at all, and at what severity. Also owns the serializer: sharing is not circularity, `toJSON` is honoured, `undefined` behaves as it does natively | **195 items** |
+| `test/selftest.mjs` | **Semantic correctness** (Tor target): should this branch report at all, and at what severity. Also owns the serializer: sharing is not circularity, `toJSON` is honoured, `undefined` behaves as it does natively, and runs `aragami_handoff` against a real directory rather than a fake one | **227 items** |
 | `test/matrix.mjs` | **Contract invariance + robustness**: however it is called, the output contract does not break | **277 calls / 557 contract checks / 0 violations** |
 | `test/net.mjs` | **Protocol behavior**: local mock proxy / SOCKS5 / a real TLS handshake over the tunnel / echo / HTTP servers | **54 items** |
 | `test/firefox.mjs` | **Semantic correctness** (Firefox target): profile discovery, retention findings, and the credential-exposure line | **142 items** |
 | `test/emblem.mjs` | **The seal**: opening with the source work, and refusing a wrong source, an altered payload, tag or nonce, or a swapped container. Built on a synthetic stream, because the claim under test is that a machine *without* the work cannot open it | **94 items** |
-| `test/checks.mjs` | **The catalog against the code, in both directions**: every id the code emits is catalogued, every catalogued check has a producer, no two checks own the same fact slot, every entry states a boundary, no template leaves a placeholder unresolved. Plus every branch of every probe, driven through an injected filesystem so a branch reachable only on another platform still runs, every value predicate asserted directly, and the literal rendering of migrated checks checked character for character | **735 items** |
+| `test/checks.mjs` | **The catalog against the code, in both directions**: every id the code emits is catalogued, every catalogued check has a producer, no two checks own the same fact slot, every entry states a boundary, no template leaves a placeholder unresolved. Plus every branch of every probe, driven through an injected filesystem so a branch reachable only on another platform still runs, every value predicate asserted directly, and the literal rendering of migrated checks checked character for character | **800 items** |
 | `test/baseline.mjs` | **Drift, and the privacy claim**: key-order-independent fingerprints, every refusal branch, and the assertion that a captured baseline contains **no** evidence -- built with a marked value that must not appear in the output. Tested over parsed values, not raw JSON, because `JSON.stringify` escapes backslashes and a substring test would pass for the wrong reason | **110 items** |
-| `test/mcp-smoke.mjs` | **The portable half**: a real MCP client sees exactly the core's tools, and every response names a versioned schema. Its calls are aimed at a synthetic install, so it does not depend on what the runner has | **60 items** |
+| `test/mcp-smoke.mjs` | **The portable half**: a real MCP client sees exactly the core's tools, and every response names a versioned schema. Its calls are aimed at a synthetic install, so it does not depend on what the runner has | **63 items** |
 | `test/coverage.mjs` | **Evidence of the traversal**: which lines were never executed | **2569/2580 = 99.6%** on Windows; the Linux continuous integration runner is lower and is the figure the gate is set against |
 
 Coverage is a property of the environment as much as of the code, and both numbers are given
@@ -439,14 +474,13 @@ The `matrix` contract includes: serializable, `boundary_notice` permanent, **no 
 15. **The output order is a contract.** Findings sort by descending severity, then by layer in the order `LAYERS` declares them, then by id. Before this, ties kept ASSEMBLY order, so moving a check from one function to another silently changed where a finding appeared while every one of its fields stayed identical -- which is exactly what happened during the catalog migration. An order that can be recomputed from the findings themselves cannot drift.
 16. **One evidence shape per probe.** Every `path-residue` finding carries `{path, size, mtime, age_days}`. Three shapes used to exist because three pieces of code had each built its own; they were unified only after the migration had been proven field-for-field, so that the suites could still distinguish a faithful move from a broken one. `stale` was dropped rather than carried: it is derivable from `age_days` and the entry's own threshold, and a recorded fact that can be recomputed is a fact that can disagree with its input.
 17. **Accept what the caller actually has.** `aragami_baseline` takes a capture *response* as well as a bare record, because redirecting a capture to a file is the obvious workflow and what lands in the file is the response.
+18. **Dynamic checks are refused, and the two kinds are refused for different reasons.** Querying Tor's ControlPort is refused for a **structural** reason: an audit whose result depends on whether a service happens to be running is no longer deterministic, and determinism is precisely what the baseline and drift feature rests on -- a capture that cannot be reproduced cannot be diffed. Testing whether a configured bridge is reachable is refused for an **operational** reason that has nothing to do with scope: **dialing a bridge from the auditor manufactures the metadata the audited user is trying to avoid.** Tor's protection against traffic correlation rests on a user's traffic not being distinguishable or linkable; a connection to a bridge, from that user's address, at a moment of that user's choosing, is exactly the observable pattern an adversary needs to find and fingerprint that bridge's use. Such a check would not merely risk harm, it would **be** the harm. Where a dynamic answer is genuinely needed, the tool does what `disk-encryption` already does: report `undetermined` and **name the command that answers it**, leaving the decision to create traffic with whoever owns the consequences.
 
 ---
 
 ## 9. Next steps
 
-- Interlock with a delivery-preparation workflow: before handing off a sensitive package, verify OnionShare availability and onion client authorization state
-
-- **The declarative boundary, and where it sits.** Thirty-seven of the fifty-eight checks are now built from catalog data by eight probes (`volume-encryption`, `path-residue`, `path-list`, `dir-entries`, `dir-size`, `json-field`, `config-value`, `static`). Adding another check of an existing shape is a data change and nothing else. The remaining twenty-one stay `bespoke` because their judgement is compositional -- an aggregate over Bridge lines, a derived category, a merge of three sources, or an evidence field computed from two others. Expressing that as data would need a way to combine predicates, and a data file that can combine predicates is a programming language with worse error messages and worse tooling than the JavaScript it replaced. `config-value` is deliberately the edge of what is allowed: nine fixed predicates, one per variant, first match wins, no nesting.
+- **The declarative boundary, and where it sits.** Forty-two of the sixty-three checks are built from catalog data by nine probes (`volume-encryption`, `path-residue`, `path-list`, `dir-entries`, `dir-size`, `json-field`, `config-value`, `static`, `tree-match`). Adding another check of an existing shape is a data change and nothing else. The remaining twenty-one stay `bespoke` because their judgement is compositional -- an aggregate over Bridge lines, a derived category, a merge of three sources, or an evidence field computed from two others. Expressing that as data would need a way to combine predicates, and a data file that can combine predicates is a programming language with worse error messages and worse tooling than the JavaScript it replaced. `config-value` is deliberately the edge of what is allowed: nine fixed predicates, one per variant, first match wins, no nesting.
 
 - **Adding a probe is a design decision; adding a check is not.** The probe vocabulary is the part that needs an argument. A new probe should be added when a *shape* recurs -- a path, a directory, a field, a size, a value comparison -- and not to avoid writing ten lines of logic once.
 

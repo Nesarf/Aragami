@@ -252,7 +252,13 @@ const mkio = (files = {}, dirs = {}, docs = {}) => {
       const hit = files[norm(p)];
       return hit ? { size: hit.size, mtime: new Date(hit.mtime ?? "2026-01-01T00:00:00Z") } : null;
     },
-    listDir: (p) => (dirs[norm(p)] ?? []).map((n) => ({ name: n, isFile: () => true })),
+    // An entry is a directory exactly when its own path is a key in `dirs`. The first version
+    // reported every entry as a file, which was invisible until a probe needed to WALK a tree --
+    // then the fake could not express a directory at all and the recursion simply never happened.
+    listDir: (p) => (dirs[norm(p)] ?? []).map((n) => {
+      const isDir = (norm(p) + "/" + n) in dirs;
+      return { name: n, isFile: () => !isDir, isDirectory: () => isDir };
+    }),
     exists: (p) => norm(p) in files || norm(p) in dirs,
     dirSize: (p) => (norm(p) in dirs ? (docs[norm(p)] ?? 1) : null),
     readJson: (p) => docs[norm(p)] ?? null,
@@ -313,9 +319,19 @@ check("everything produced without context comes from a base-independent entry",
 // one is a fact about the machine.
 check("a base-reading check with no base map is silent rather than guessing",
   !bare.some((f) => f.id === "onion-auth-absent"), bare.map((f) => f.id).join(","));
-const emptyBases = evaluateBuiltins("tor", { platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0, bases: {}, entries: {} });
-check("an empty base map is read as not-configured",
-  emptyBases.some((f) => f.id === "onion-auth-absent"), emptyBases.map((f) => f.id).join(","));
+// "Not configured" and "nothing was described" are different answers, and only the first is a
+// fact about the machine. A Tor install that was READ and whose torrc names no authorization
+// directory is the first. An empty base map is the second -- and this assertion used to claim
+// otherwise, which is exactly the defect the hand-off target exposed: nothing had been asked, and
+// the tool still answered. Same class as an empty mount table read as "no encryption" (D38).
+const describedNoAuth = evaluateBuiltins("tor",
+  { platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0, bases: { data_dir: "/tb/data" }, entries: {} });
+check("an install that was read and names no auth directory is reported as not-configured",
+  describedNoAuth.some((f) => f.id === "onion-auth-absent"), describedNoAuth.map((f) => f.id).join(","));
+const emptyBases = evaluateBuiltins("tor",
+  { platform: "win32", root: "E:\\", mountInfo: null, statfsType: 0, bases: {}, entries: {} });
+check("an EMPTY base map is not read as not-configured, because nothing was described",
+  !emptyBases.some((f) => f.id === "onion-auth-absent"), emptyBases.map((f) => f.id).join(","));
 check("a configured auth directory silences the absent case",
   !evaluateBuiltins("tor", torCtx({}, mkio(), { auth_dir: "/a" })).some((f) => f.id === "onion-auth-absent"));
 
@@ -520,6 +536,134 @@ check("the first matching variant wins",
     title: "t", detail: "d" }, { prefs: { x: 1 }, io: mkio() }).title === "first");
 check("the predicate vocabulary is the closed set the module documents",
   VALUE_PREDICATES.length === 9 && VALUE_PREDICATES.includes("any_present"), VALUE_PREDICATES.join(","));
+
+/* ====================== 6g. the tree-match probe ====================== */
+
+// The hand-off target's probe, tested branch by branch. It is the only probe that WALKS a tree, so
+// the branches worth pinning are the bounds: a scan that silently stops early would report a
+// partial directory as a whole one, which for this tool is worse than reporting nothing.
+const oneHandoff = (ctx, id) => evaluateBuiltins("handoff", ctx).find((f) => f.id === id);
+const handoffCtx = (files = {}, dirs = {}, extraBases = {}) => ({
+  platform: "win32", root: "/h", mountInfo: null, statfsType: 0,
+  bases: { handoff_root: "/h", home: "/home/u", tmp: "/tmp", ...extraBases },
+  io: mkio(files, dirs), prefs: {}, entries: {},
+});
+
+// A two-level tree: /h/sub/id_rsa, and /h/sub as a directory because it is a key in the dir map.
+const nestedTree = () => handoffCtx(
+  { "/h/sub/id_rsa": { size: 1675, mtime: daysAgo(3) } },
+  { "/h": ["sub"], "/h/sub": ["id_rsa"] },
+);
+
+check("tree-match finds a matching file at the top level",
+  !!oneHandoff(handoffCtx({ "/h/id_ed25519": { size: 411, mtime: daysAgo(1) } }, { "/h": ["id_ed25519"] }), "handoff-secret-material"));
+
+const nested = oneHandoff(nestedTree(), "handoff-secret-material");
+check("tree-match recurses into subdirectories", !!nested, "a name match at depth 2 was missed");
+check("the recorded path is relative to the root, with forward slashes",
+  nested?.evidence?.entries?.[0]?.path === "sub/id_rsa", JSON.stringify(nested?.evidence?.entries));
+check("the evidence reports how much of the tree was actually walked",
+  nested?.evidence?.scanned >= 2 && nested?.evidence?.truncated === false, JSON.stringify(nested?.evidence));
+
+check("a tree with nothing matching produces no finding",
+  oneHandoff(handoffCtx({ "/h/notes.txt": { size: 10, mtime: daysAgo(1) } }, { "/h": ["notes.txt"] }), "handoff-secret-material") === undefined);
+
+check("a missing root produces no finding rather than throwing",
+  oneHandoff(handoffCtx({}, {}), "handoff-secret-material") === undefined);
+
+// Directories are matched only where the entry asks for it: .git is the finding, but a directory
+// called node_modules is build residue rather than key material.
+const gitTree = () => handoffCtx({}, { "/h": [".git"], "/h/.git": ["config"] });
+check("a directory is reported when the check asks for directories",
+  !!oneHandoff(gitTree(), "handoff-vcs-internals"));
+check("the same directory is NOT reported by a check that only wants files",
+  oneHandoff(gitTree(), "handoff-secret-material") === undefined);
+check("a reported directory is still descended into",
+  oneHandoff(gitTree(), "handoff-vcs-internals")?.evidence?.scanned >= 2,
+  JSON.stringify(oneHandoff(gitTree(), "handoff-vcs-internals")?.evidence));
+
+// The depth bound. max_depth 8 is the default; a tree deeper than that is not claimed to be clean.
+// A straight chain /h/d0/d1/.../d{levels} with the file at the bottom. The first version of this
+// built the path with nested joins and a replace(), never produced a real chain, and therefore
+// "passed" its assertion for entirely the wrong reason -- which the control below caught.
+const deep = (levels) => {
+  const dirs = { "/h": ["d0"] };
+  let at = "/h/d0";
+  for (let i = 1; i <= levels; i++) {
+    dirs[at] = ["d" + i];
+    at = at + "/d" + i;
+  }
+  dirs[at] = ["id_rsa"];
+  return handoffCtx({ [at + "/id_rsa"]: { size: 1, mtime: daysAgo(1) } }, dirs);
+};
+check("a file beyond the depth bound is not reported",
+  oneHandoff(deep(20), "handoff-secret-material") === undefined,
+  "the walk claimed to have covered a tree deeper than its own bound");
+// The control: the same fixture with a bound deep enough MUST find it. Without this, a broken tree
+// builder would also produce "no finding" and the assertion above would pass for the wrong reason.
+const deepCtx = deep(20);
+const reached = evaluateOneBuiltin(
+  { layer: "crypto", id: "probe-depth", severities: ["warn"], probe: BUILTIN_PROBES.TREE_MATCH,
+    probe_args: { base: "handoff_root", patterns: ["^id_rsa$"], max_depth: 25 },
+    title: "t", detail: "d" },
+  deepCtx);
+check("the same tree IS found when the depth bound allows it",
+  reached !== null && reached.evidence.matched === 1,
+  reached === null ? "not found even with max_depth 25 -- the fixture is wrong, not the bound" : JSON.stringify(reached.evidence));
+
+// The entry bound. Twelve thousand files with a cap of ten: the scan must stop, and it must say so.
+const wide = () => {
+  const names = Array.from({ length: 12000 }, (_, i) => "f" + i + ".txt");
+  const files = { "/h/target/id_rsa": { size: 1, mtime: daysAgo(1) } };
+  for (const n of names) files["/h/many/" + n] = { size: 1, mtime: daysAgo(1) };
+  return { files, dirs: { "/h": ["many", "target"], "/h/many": names, "/h/target": ["id_rsa"] } };
+};
+const capped = (() => { const w = wide(); return evaluateOneBuiltin(
+  { layer: "crypto", id: "probe-cap", severities: ["warn"], probe: BUILTIN_PROBES.TREE_MATCH,
+    probe_args: { base: "handoff_root", patterns: ["^id_rsa$"], max_entries: 10 },
+    title: "t", detail: "d" },
+  handoffCtx(w.files, w.dirs)); })();
+check("the walk stops at max_entries", capped === null, "it walked past its own cap");
+const capped2 = (() => { const w = wide(); return evaluateOneBuiltin(
+  { layer: "crypto", id: "probe-cap2", severities: ["warn"], probe: BUILTIN_PROBES.TREE_MATCH,
+    probe_args: { base: "handoff_root", patterns: ["^id_rsa$"], max_entries: 10, min_count: 0 },
+    title: "t", detail: "d" },
+  handoffCtx(w.files, w.dirs)); })();
+check("a truncated scan says so in its evidence rather than reporting a partial tree as complete",
+  capped2?.evidence?.truncated === true && capped2?.evidence?.scanned <= 11,
+  JSON.stringify(capped2?.evidence));
+
+// The count in the title is the TOTAL, not the length of the shown slice -- a reader acts on the
+// number, and a cap on the evidence list must not quietly become a cap on the claim.
+const many = () => {
+  // These must match the check's own patterns. The first version used id_rsa0..19, which matches
+  // neither ^id_rsa$ nor ^.*_rsa$ -- so the fixture produced no finding and the test failed for a
+  // reason that had nothing to do with the claim it was making.
+  const names = Array.from({ length: 20 }, (_, i) => "key" + i + ".pem");
+  const files = {}; for (const n of names) files["/h/" + n] = { size: 1, mtime: daysAgo(1) };
+  return handoffCtx(files, { "/h": names });
+};
+const manyHit = oneHandoff(many(), "handoff-secret-material");
+check("the title count is the total matched, not the number shown",
+  manyHit?.title.includes("20"), manyHit?.title);
+check("the evidence list is capped while the count is not",
+  manyHit?.evidence?.entries?.length === 12 && manyHit?.evidence?.matched === 20,
+  JSON.stringify({ shown: manyHit?.evidence?.entries?.length, matched: manyHit?.evidence?.matched }));
+
+// The OnionShare presence check is a path-list over a fixed set of locations, so it reports where
+// it was found rather than merely that something was.
+check("onionshare presence is silent when nothing is installed",
+  oneHandoff(handoffCtx(), "handoff-onionshare") === undefined);
+const osHit = oneHandoff(handoffCtx({}, { "/home/u/AppData/Local/OnionShare": [] }), "handoff-onionshare");
+check("onionshare presence reports the locations it found", !!osHit && osHit.evidence.traces.length === 1,
+  JSON.stringify(osHit?.evidence));
+
+// Every probe branch reachable from the catalog is exercised above, and the catalog entries that
+// use the new probe must all be handoff-target or the counts here mean nothing.
+check("the tree-match probe is declared in BUILTIN_PROBES",
+  typeof BUILTIN_PROBES.TREE_MATCH === "string" && BUILTIN_PROBES.TREE_MATCH === "tree-match");
+check("handoff is a declared target",
+  TARGETS.includes("handoff"), TARGETS.join(","));
 
 /* ====================== 6e. templates ====================== */
 

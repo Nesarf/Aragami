@@ -592,6 +592,61 @@ what happens when the observation and the expectation arrive at the same time.
 Both were fixed before anything was concluded from them, and the second is the reason the final
 script asserts the icon where it can actually be read -- the package's own tables -- instead of
 repeating a working check somewhere it does not work.
+---
+
+## 11. Defects caught building the hand-off target
+
+### D60. Reusing a check against a target it was not written for made it invent an answer
+
+`aragami_handoff` reuses the three built-in onion-authorization checks rather than restating them,
+which is the point of the catalog: they are declared for `handoff` as well as `tor`, and they are
+gated on the bases a Tor install supplies. With no Tor install the bases are absent and they should
+stay silent.
+
+`onion-auth-absent` did not. It reads `bases.auth_dir`, and a base map that simply **lacks** that
+key looks identical to a Tor install whose torrc **names no authorization directory** -- so pointing
+the hand-off tool at a directory on a machine with no Tor at all produced the finding "Onion service
+client authorization not configured". Nothing had been asked, and the tool answered.
+
+The two cases are genuinely different claims:
+
+    a Tor install was read, and its torrc names no ClientOnionAuthDir   -> not configured
+    no Tor install was read at all                                      -> cannot say
+
+The existing guard (`if (fromBase && !ctx.bases) return null`) only caught the second case when the
+whole base map was absent, which is not how the hand-off context is built -- it always supplies a
+map, because it always has a directory to describe.
+
+**The fix is a precondition, not a predicate.** A variant names one key and asks one question about
+it; `present` and `absent` cannot be combined, and deliberately so -- composition is where a data
+table becomes a programming language. So `config-value` gained `require_base`: the name of a base
+that must be present for the check to be able to answer *at all*, checked before any variant runs.
+`onion-auth-absent` declares `require_base: "data_dir"`. It is a guard of exactly the kind the probe
+already had, and it keeps the closed predicate vocabulary closed.
+
+This is the same class as D38, where an empty mount table was read as "no encryption" because the
+code tested truthiness rather than type. Both are the tool answering a question it had not been
+given the information to answer, and both were found by exercising a path nobody had exercised.
+
+The test that had encoded the old belief -- "an empty base map is read as not-configured" -- was
+rewritten rather than deleted, and now asserts both halves separately: a described install with no
+auth directory **is** reported, and an empty base map **is not**.
+
+### D61. A fixture can pass an assertion for the wrong reason, and only a control catches it
+
+The depth bound of the new `tree-match` probe was asserted with "a file beyond the bound is not
+reported". The fixture that built the deep tree was written with nested joins and a `replace()` and
+never produced a chain at all -- so nothing was found, and the assertion passed while testing
+nothing.
+
+The control added alongside it -- the same tree with `max_depth` raised, which **must** find the
+file -- failed immediately and reported "the fixture is wrong, not the bound".
+
+The rule worth keeping: **an assertion that something is absent needs a companion that shows it can
+be present.** D59 records the other two shapes this took in the same project (a `PATH` that predated
+the install, and a `DisplayIcon` value that MSI never writes); this one is the first where the
+assertion was correct and the fixture was not.
+
 
 
 
